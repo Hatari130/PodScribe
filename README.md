@@ -1,267 +1,171 @@
-# podscribe
+# PodScribe
 
-`podscribe` 是一个给 Claude、Codex、WorkBuddy 等 Agent 使用的播客转录 skill。
+播客一站式 skill：**订阅 → 转录 → 知识库**。
 
-你可以把这个目录放进对应工具的 skills 目录里，让 Agent 在需要处理播客时调用它。它的目标不是做一个完整播客客户端，而是帮你把播客内容沉淀成本地可搜索、可总结、可整理的 Markdown 文档。
+自带分领域中英文播客订阅库（AI / 科技商业 / 人文社会 / 文化艺术 / 健康），可一键补全官方 RSS、导入订阅、同步元数据、全文转录、生成章节与摘要、本地全文搜索。
+
+放进 Claude / Codex / WorkBuddy 等 Agent 的 skills 目录即可使用。用户不需要记命令，把需求交给 Agent 就行。
 
 ## 能干嘛
 
-`podscribe` 主要做三件事：
-
-1. 把小宇宙单集链接转成带时间戳的 Markdown 文字稿。
-2. 给文字稿自动生成章节和摘要。
-3. 管理 RSS 播客库，让 Agent 可以先同步节目列表，再按需选择某一期转录和搜索。
-
-适合这些场景：
-
-- “帮我把这期小宇宙转成文字稿。”
-- “这期播客讲了什么，帮我总结一下。”
-- “把这个播客 RSS 加到本地库，以后方便搜索。”
-- “帮我查一下这个播客最近有没有聊过 AI Agent。”
-- “把这期转成 Obsidian 笔记格式。”
-
-## 适合放在哪里
-
-这是一个本地 skill，适合放在：
-
-- Claude 的本地 skills 目录
-- Codex 的 skills 目录
-- WorkBuddy 的 skills 目录
-- 其他能读取本地 skill 并执行命令的 Agent 环境
-
-放好后，Agent 应该在本目录运行命令：
-
-```powershell
-python transcribe.py ...
+```text
+"有什么好的 AI 播客？"                    → 查 feeds/ai.json，推荐并导入
+"帮我把这期小宇宙转成文字稿"               → 转录单集
+"这期播客讲了什么，帮我总结一下"             → 转录 + 摘要 + 章节
+"帮我加上 Dwarkesh Podcast"              → resolve_feeds.py add
+"把这个 RSS 加到本地库"                   → rss add
+"这个播客最近有没有聊过 AI Agent？"         → rss search
+"转成 Obsidian 笔记格式"                  → --summary obsidian
+"哪些订阅源失效了？"                      → resolve_feeds.py validate
 ```
 
-## 第一次使用前
+## 目录结构
 
-需要本机具备：
-
-- Python 3
-- `ffmpeg`
-- `ffprobe`
-- 硅基流动 API Key
-
-Windows 安装 `ffmpeg`：
-
-```powershell
-winget install --id=Gyan.FFmpeg -e
+```
+podscribe/
+├── transcribe.py                # 核心：转录 / RSS 管理 / 搜索
+├── config.json                  # 硅基流动 API 配置
+├── subscriptions.json           # 活跃订阅列表
+├── podcast_library/             # 转录后的本地知识库
+│
+├── podscribe-feeds/             # 📦 分领域订阅库
+│   ├── feeds/
+│   │   ├── ai.json              # AI（中英混排，含 Lex Fridman）
+│   │   ├── tech-business.json   # 科技与商业（含 Acquired / All-In …）
+│   │   ├── humanities-society.json
+│   │   ├── culture-art.json
+│   │   └── health.json          # 健康（含 Huberman Lab）
+│   ├── resolve_feeds.py         # iTunes 解析：bootstrap / add / upgrade / validate
+│   └── import_feeds.py          # 合并分类 → subscriptions.json
+│
+├── SKILL.md                     # Agent 指令文档
+└── README.md                    # 本文件
 ```
 
-macOS：
+## 第一次使用
 
-```bash
-brew install ffmpeg
-```
-
-Ubuntu / Debian：
-
-```bash
-sudo apt install ffmpeg python3
-```
-
-确认环境：
-
-```powershell
-python --version
-ffmpeg -version
-ffprobe -version
-```
-
-生成配置：
-
-```powershell
-python transcribe.py --init
-```
-
-也可以用环境变量提供 API Key：
-
-```powershell
-[Environment]::SetEnvironmentVariable("SILICONFLOW_API_KEY", "sk-xxx", "User")
-```
-
-```bash
-export SILICONFLOW_API_KEY=sk-xxx
-```
-
-不要把真实 API Key 提交到仓库。仓库里的 `config.json` 应该保持占位 key，或者改用环境变量。
-
-## 用户怎么用
-
-用户不需要记完整命令，只要把需求交给 Agent。
-
-例如：
+跟 Agent 说一句就行：
 
 ```text
-帮我转录这期小宇宙，并生成摘要和章节：
-https://www.xiaoyuzhoufm.com/episode/xxxxx
+"帮我装一下这个播客工具"
+"初始化一下 PodScribe"
+"配好播客 skill，我想开始用了"
 ```
 
-Agent 应该执行：
+Agent 会自动完成以下全部步骤：
 
-```powershell
-python transcribe.py "https://www.xiaoyuzhoufm.com/episode/xxxxx" --summary --chapters
+1. **检查环境** — python / ffmpeg / ffprobe，缺什么装什么
+2. **配置 API Key** — 运行 `python transcribe.py --init`，引导你填硅基流动的 Key（RSS 入库不需要，转录时才用）
+3. **拉取订阅库** — 运行 `resolve_feeds.py bootstrap`，通过 iTunes 把内置 64 个中英文节目的官方 RSS 全部解析回来
+4. **导入订阅** — 运行 `import_feeds.py --all`，合并进 `subscriptions.json`
+
+全程你只需要提供一个硅基流动 API Key，其余 Agent 处理。
+
+> 手动跑也行，见下面的命令，但一般不需要。
+
+<details>
+<summary>手动命令（折叠）</summary>
+
+```bash
+# 环境
+# Windows:  winget install --id=Gyan.FFmpeg -e
+# macOS:    brew install ffmpeg
+# Ubuntu:   sudo apt install ffmpeg python3
+python --version && ffmpeg -version && ffprobe -version
+
+# 配置
+python transcribe.py --init
+# 或环境变量: export SILICONFLOW_API_KEY=sk-你的Key
+
+# 订阅库
+cd podscribe-feeds
+python resolve_feeds.py bootstrap
+python import_feeds.py --all
 ```
 
-如果用户只要全文稿：
+</details>
 
-```powershell
-python transcribe.py "https://www.xiaoyuzhoufm.com/episode/xxxxx"
-```
-
-如果用户要 Obsidian 笔记：
-
-```powershell
-python transcribe.py "https://www.xiaoyuzhoufm.com/episode/xxxxx" --summary obsidian --chapters
-```
-
-## Agent 应该怎么用
+## 日常使用
 
 ### 转录单集
 
-当用户给出小宇宙 episode 链接，并要求转录、总结、整理笔记时，优先使用单集转录。
+```bash
+# 转录 + 章节 + 摘要（推荐）
+python transcribe.py "<小宇宙链接>" --summary --chapters
 
-推荐默认命令：
+# 纯转录
+python transcribe.py "<小宇宙链接>"
 
-```powershell
-python transcribe.py "<episode_url>" --summary --chapters
+# 指定摘要模式
+python transcribe.py "<链接>" --summary deep --chapters
 ```
 
-只转录不总结：
+摘要模式：`brief`（快速看懂）、`deep`（结构化笔记）、`product`（产品经理视角）、`investment`（投资视角）、`obsidian`（Obsidian 格式）。
 
-```powershell
-python transcribe.py "<episode_url>"
+### RSS 知识库
+
+不要默认批量转录。正确流程：同步 → 浏览/搜索 → 用户选某一期 → 转录。
+
+```bash
+# 添加订阅
+python transcribe.py rss add "日谈公园" "https://anchor.fm/s/2389ed24/podcast/rss"
+
+# 同步最近 50 期元数据
+python transcribe.py rss sync "日谈公园" --limit 50
+
+# 列出单集
+python transcribe.py rss list "日谈公园" --limit 50
+
+# 搜索（已转录的搜全文，未转录的只搜标题/简介）
+python transcribe.py rss search "日谈公园" "AI Agent" --days 90
+
+# 转录选中的一期
+python transcribe.py rss transcribe "日谈公园" 6 --summary --chapters
+
+# 列出所有订阅及统计
+python transcribe.py rss subs
 ```
 
-指定摘要类型：
+### 管理订阅库
 
-```powershell
-python transcribe.py "<episode_url>" --summary brief
-python transcribe.py "<episode_url>" --summary deep
-python transcribe.py "<episode_url>" --summary product
-python transcribe.py "<episode_url>" --summary investment
-python transcribe.py "<episode_url>" --summary obsidian
+```bash
+cd podscribe-feeds
+
+# 按名字加一个节目
+python resolve_feeds.py add "Latent Space" --category ai --country us
+python resolve_feeds.py add "声动早咖啡" --category tech-business --country cn
+
+# 代理源升级为官方源
+python resolve_feeds.py upgrade feeds/ --country cn
+
+# 检查链接存活
+python resolve_feeds.py validate feeds/
+
+# 导入新增的
+python import_feeds.py --all
 ```
 
-摘要模式含义：
+## 输出
 
-- `brief`：快速看懂这期讲了什么。
-- `deep`：更详细的结构化笔记。
-- `product`：偏产品经理视角。
-- `investment`：偏投资分析视角。
-- `obsidian`：适合放进 Obsidian 的笔记格式。
-
-### 使用 RSS 播客库
-
-当用户给的是 RSS，或问“某个播客最近有没有聊过某主题”时，不要默认批量转录所有单集。正确流程是：
-
-1. 添加或同步 RSS。
-2. 列出或搜索已有单集。
-3. 让用户选择值得转录的那一期。
-4. 只转录选中的单集。
-
-添加订阅：
-
-```powershell
-python transcribe.py rss add "播客名" "<rss_url>"
-```
-
-同步最近 50 期：
-
-```powershell
-python transcribe.py rss sync "播客名" --limit 50
-```
-
-列出单集：
-
-```powershell
-python transcribe.py rss list "播客名" --limit 50
-```
-
-搜索主题：
-
-```powershell
-python transcribe.py rss search "播客名" "AI Agent" --episodes 50
-```
-
-转录选中的某一期：
-
-```powershell
-python transcribe.py rss transcribe "播客名" 6 --summary --chapters
-```
-
-`selector` 可以是期号、列表里的 `#id`，也可以是 guid 前缀。
-
-搜索结果需要注意：
-
-- 已转录单集会搜索全文。
-- 未转录单集只会搜索标题和简介。
-- 标题或简介命中，不代表全文里一定详细讨论过这个主题。
-
-## 输出什么
-
-默认会输出 Markdown 文件路径。
-
-全文稿通常是：
-
-```text
-<标题>.md
-```
-
-摘要文件通常是：
-
-```text
-<标题>.summary.brief.md
-<标题>.summary.deep.md
-<标题>.summary.product.md
-<标题>.summary.investment.md
-<标题>.obsidian.md
-```
-
-RSS 模式下，转录结果会保存在：
-
-```text
-podcast_library/transcripts/
-```
-
-本地库数据库在：
-
-```text
-podcast_library/library.sqlite3
-```
-
-订阅列表在：
-
-```text
-subscriptions.json
-```
+全文稿：`<标题>.md`
+摘要：`<标题>.summary.brief.md` / `.deep.md` / `.obsidian.md` 等
+RSS 转录：`podcast_library/transcripts/`
+数据库：`podcast_library/library.sqlite3`
+订阅：`subscriptions.json`
 
 ## 常用检查
 
-转录前自检：
-
-```powershell
-python transcribe.py --preflight-only "https://www.xiaoyuzhoufm.com/episode/xxxxx"
-```
-
-查看主命令帮助：
-
-```powershell
-python transcribe.py --help
-```
-
-查看 RSS 命令帮助：
-
-```powershell
-python transcribe.py rss --help
+```bash
+python transcribe.py --preflight-only "<链接>"   # 转录前自检
+python transcribe.py --help                       # 主命令帮助
+python transcribe.py rss --help                   # RSS 帮助
 ```
 
 ## 当前限制
 
-- 目前主要支持小宇宙 episode 链接和标准 RSS 音频源。
-- RSS 中没有音频 URL 的单集只能入库标题和简介，不能直接转录。
-- 转录模型不会自动区分说话人。
+- 主要支持小宇宙 episode 链接和标准 RSS 音频源。
+- RSS 中没有音频 URL 的单集只能入库标题和简介，不能转录。
+- 转录模型不区分说话人。
 - 自动章节和摘要适合作为初稿，重要内容建议人工复核。
 - 长音频耗时取决于音频长度、并发数和 API 限流。
+- `bootstrap` / `add` / `upgrade` 需要能访问 `itunes.apple.com`。

@@ -1178,7 +1178,7 @@ def fetch_text(url: str, *, timeout: int = 30) -> str:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "Mozilla/5.0 (compatible; xiaoyuzhou-transcribe/1.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; PodScribe/1.0)",
             "Accept": "application/rss+xml, application/xml, text/xml, */*",
         },
     )
@@ -1652,6 +1652,86 @@ def rss_subs(args: argparse.Namespace, config: dict) -> int:
         print(f"    RSS: {rss_url}")
     return 0
 
+
+def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    """扫描 podscribe-feeds/*.json,批量添加未入库的播客并同步。"""
+    # 确定 feeds 目录位置
+    script_dir = Path(__file__).resolve().parent
+    feeds_dir = Path(args.feeds_dir) if args.feeds_dir else script_dir / "podscribe-feeds"
+
+    if not feeds_dir.is_dir():
+        print(f"❌ 未找到 feeds 目录: {feeds_dir}")
+        print(f"请创建 {feeds_dir} 目录并在其中放置分类 JSON 文件。")
+        return 1
+
+    # 扫描所有 JSON 文件
+    json_files = sorted(feeds_dir.glob("*.json"))
+    if not json_files:
+        print(f"❌ feeds 目录中没有 JSON 文件: {feeds_dir}")
+        return 1
+
+    # 收集所有 feeds
+    all_entries: list[dict] = []
+    for jf in json_files:
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for entry in data:
+                    if entry.get("name") and entry.get("rss_url"):
+                        entry["_source_file"] = jf.name
+                        all_entries.append(entry)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"⚠️  跳过 {jf.name}: {e}")
+
+    print(f"podscribe-feeds 共 {len(json_files)} 个分类, {len(all_entries)} 个播客\n")
+
+    root = library_root(config, args.library_dir)
+    added = 0
+    skipped = 0
+    failed = 0
+
+    with open_library(root) as conn:
+        for entry in all_entries:
+            name = entry["name"]
+            rss_url = entry["rss_url"]
+            source = entry.get("_source_file", "?")
+
+            # 检查是否已存在且有数据
+            existing = get_subscription(conn, name)
+            try:
+                if existing:
+                    ep_count = conn.execute(
+                        "SELECT COUNT(*) FROM episodes WHERE subscription_id = ?", (existing["id"],)
+                    ).fetchone()[0]
+                    if ep_count > 0:
+                        skipped += 1
+                        continue
+                    # 已添加但无数据,重试同步
+                    subscription = existing
+                    print(f"  ~ 重试同步: {name}")
+                else:
+                    # 添加新订阅
+                    add_subscription(conn, name, rss_url)
+                    subscription = get_required_subscription(conn, name)
+                    print(f"  + 已添加: {name}")
+                    added += 1
+
+                # 同步最近 N 期
+                limit = args.limit if args.limit else 50
+                print(f"    同步中...")
+                podcast_title, episodes = parse_rss_feed(fetch_text(rss_url))
+                selected = filter_feed_episodes(episodes, limit=limit, days=None)
+                new_count, updated_count = sync_subscription(conn, subscription, selected)
+                upsert_subscription_json(config_path, name, rss_url, last_synced=utc_now_iso())
+                print(f"    -> {new_count} 期入库")
+            except Exception as e:
+                print(f"  x 失败: {name} ({e})")
+                failed += 1
+
+    print(f"\n汇总: 新增 {added} 个, 跳过 {skipped} 个(已存在), 失败 {failed} 个")
+    print(f"库目录: {root.resolve()}")
+    return 0
+
 def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | None) -> int:
     root = library_root(config, args.library_dir)
     settings = build_settings(args, config)
@@ -1827,6 +1907,11 @@ def rss_main(argv: list[str]) -> int:
     subs_parser = subparsers.add_parser("subs", help="列出所有已订阅的播客")
     subs_parser.add_argument("--library-dir", default=None, help="播客库目录")
 
+    sync_feeds_parser = subparsers.add_parser("sync-feeds", help="批量从 podscribe-feeds 导入并同步")
+    sync_feeds_parser.add_argument("--feeds-dir", default=None, help="podscribe-feeds 目录路径,默认 transcribe.py 同级的 podscribe-feeds/")
+    sync_feeds_parser.add_argument("--limit", type=int, default=50, help="每个播客同步多少期,默认 50")
+    sync_feeds_parser.add_argument("--library-dir", default=None, help="播客库目录")
+
     args = parser.parse_args(argv)
     try:
         config, config_path = load_config(args.config)
@@ -1840,6 +1925,8 @@ def rss_main(argv: list[str]) -> int:
             return rss_list(args, config)
         if args.command == "subs":
             return rss_subs(args, config)
+        if args.command == "sync-feeds":
+            return rss_sync_feeds(args, config, config_path)
         if args.command == "transcribe":
             return rss_transcribe(args, config, config_path)
         if args.command == "search":

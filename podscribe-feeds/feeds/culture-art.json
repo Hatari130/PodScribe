@@ -1,0 +1,34 @@
+[
+  {
+    "name": "跳岛FM",
+    "rss_url": "https://tiaodao.typlog.io/feed/audio.xml",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "文化艺术",
+    "source": "typlog",
+    "note": "中信·大方出品的文学播客；如失效用 resolve_feeds.py 修复（Apple id 1504037049）"
+  },
+  {
+    "name": "一天世界",
+    "rss_url": "https://yitianshijie.net/feed/audio.xml",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "文化艺术",
+    "source": "official",
+    "note": "李如一，科技与文化评论"
+  },
+  {
+    "name": "一画一话",
+    "rss_url": "https://www.theviewtalk.com/rss",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "文化艺术",
+    "source": "official",
+    "note": "艺术与绘画"
+  },
+  {
+    "name": "保持偏见",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/663e3c95af1e22bb157dcee3",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "文化艺术",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "设计、审美与创作"
+  }
+]

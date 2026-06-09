@@ -1,0 +1,74 @@
+[
+  {
+    "name": "张小珺Jùn｜商业访谈录",
+    "rss_url": "https://feed.xyzfm.space/dk4yh3pkpjp3",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "official",
+    "note": "大量 AI 创业者、研究者深度访谈"
+  },
+  {
+    "name": "硅谷101",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/5e5c52c9418a84a04625e6cc",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "硅谷科技与 AI 前沿"
+  },
+  {
+    "name": "晚点聊 LateTalk",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/61933ace1b4320461e91fd55",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "晚点团队的科技与 AI 长访谈"
+  },
+  {
+    "name": "OnBoard!",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/61cbaac48bb4cd867fcabe22",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "中美科技、云、AI 与一级市场"
+  },
+  {
+    "name": "AI炼金术",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/63e9ef4de99bdef7d39944c8",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "聚焦 AI 应用与落地"
+  },
+  {
+    "name": "人民公园说AI",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/65257ff6e8ce9deaf70a65e9",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "AI 话题轻松向解读"
+  },
+  {
+    "name": "十字路口Crossing",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/60502e253c92d4f62c2a9577",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "AI 产品与 Agent"
+  },
+  {
+    "name": "开始连接LinkStart",
+    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/63ff0da51b1faf8a0b70b337",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "xiaoyuzhou-rsshub",
+    "note": "AI 与技术从业者对谈"
+  },
+  {
+    "name": "Lex Fridman Podcast",
+    "rss_url": "https://lexfridman.com/feed/podcast/",
+    "added_at": "2026-06-09T00:00:00+00:00",
+    "category": "AI",
+    "source": "official",
+    "note": "英文，AI / 科学 / 哲学长访谈。更多英文 AI 节目用 resolve_feeds.py bootstrap --only ai 拉取"
+  }
+]
