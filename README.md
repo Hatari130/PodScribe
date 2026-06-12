@@ -1,6 +1,6 @@
 # PodScribe
 
-[English](./README.en.md) · MIT License · 零 Python 第三方依赖
+[English](./README.en.md) 
 
 播客一站式 skill：**订阅 → 转录 → 知识库**。
 
@@ -46,12 +46,11 @@ podscribe/
 
 ## 第一次使用
 
-跟 Agent 说一句就行：
+把github链接发给 Agent ,跟 Agent 说一句就行：
 
 ```text
-"帮我装一下这个播客工具"
-"初始化一下 PodScribe"
-"配好播客 skill，我想开始用了"
+"帮我装一下这个播客工具skill"
+"配好播客PodScribe skill，我想开始用了"
 ```
 
 Agent 会自动完成以下全部步骤：
