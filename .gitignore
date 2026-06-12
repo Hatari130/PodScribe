@@ -1,2 +1,38 @@
+# --- PodScribe: personal data & secrets (NEVER commit) ---
+config.json
+subscriptions.json
+_user_meta.json
+podcast_library/
+*.summary.*.md              # generated summaries
+*.transcript.md
+
+# --- Python ---
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# --- Audio / temp ---
+*.mp3
+*.m4a
+*.wav
+*.tmp
+tmp/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

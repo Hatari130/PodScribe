@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """
-小宇宙播客 → 带时间戳的 Markdown 文字稿(硅基流动版)
+小宇宙播客 → 带时间戳的 Markdown 文字稿
 
 用法:
     python transcribe.py <小宇宙链接> [选项]
 
 环境变量:
-    SILICONFLOW_API_KEY  (必须) 在 https://cloud.siliconflow.cn 免费注册,送 14 元额度
+    默认必剪 ASR 免费免配置。
+    SILICONFLOW_API_KEY 仅在使用 --asr-provider siliconflow 时需要。
 
 设计要点:
 - 纯标准库,无第三方依赖
-- 客户端按目标段长(默认 30 秒)预切片,每片独立调 API,时间戳天生对齐
-- SenseVoice 中文优于 Whisper,延迟也低得多
+- 默认调用必剪 BcutASR 云端接口,免注册免 key
+- 保留硅基流动 SenseVoice 兼容路径,可用 --asr-provider siliconflow 手动启用
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import difflib
 import getpass
 import hashlib
+import hmac
 import html as html_lib
 import json
 import os
@@ -31,8 +34,10 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -40,26 +45,38 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 
 API_ENDPOINT = "https://api.siliconflow.cn/v1/audio/transcriptions"
-SUMMARY_API_ENDPOINT = "https://api.siliconflow.cn/v1/chat/completions"
+BCUT_API_BASE_URL = "https://member.bilibili.com/x/bcut/rubick-interface"
+BCUT_API_REQ_UPLOAD = BCUT_API_BASE_URL + "/resource/create"
+BCUT_API_COMMIT_UPLOAD = BCUT_API_BASE_URL + "/resource/create/complete"
+BCUT_API_CREATE_TASK = BCUT_API_BASE_URL + "/task"
+BCUT_API_QUERY_RESULT = BCUT_API_BASE_URL + "/task/result"
+JIANYING_SIGN_URL = "https://asrtools-update.bkfeng.top/sign"
+JIANYING_API_BASE_URL = "https://lv-pc-api-sinfonlinec.ulikecam.com"
 DEFAULT_MODEL = "FunAudioLLM/SenseVoiceSmall"  # 中文最快最准的免费选择
-DEFAULT_SUMMARY_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+ASR_PROVIDERS = ("bcut", "jianying", "siliconflow")
+DEFAULT_ASR_PROVIDER = "bcut"
 DEFAULT_SEGMENT_SECONDS = 30
 DEFAULT_WORKERS = 5
+DEFAULT_FREE_ASR_CHUNK_MINUTES = 10
+DEFAULT_FREE_ASR_OVERLAP_SECONDS = 10
+DEFAULT_FREE_ASR_WORKERS = 3
 AUDIO_BITRATE = "64k"
 SUMMARY_MODES = ("brief", "deep", "product", "investment", "obsidian")
 
 CONFIG_TEMPLATE = {
+    "asr_provider": DEFAULT_ASR_PROVIDER,
     "siliconflow_api_key": "sk-替换成你的硅基流动APIKey",
     "model": DEFAULT_MODEL,
     "api_endpoint": API_ENDPOINT,
     "segment_seconds": DEFAULT_SEGMENT_SECONDS,
     "workers": DEFAULT_WORKERS,
+    "free_asr_chunk_minutes": DEFAULT_FREE_ASR_CHUNK_MINUTES,
+    "free_asr_overlap_seconds": DEFAULT_FREE_ASR_OVERLAP_SECONDS,
+    "free_asr_workers": DEFAULT_FREE_ASR_WORKERS,
     "audio_bitrate": AUDIO_BITRATE,
     "output": None,
     "keep_audio": False,
     "library_dir": "podcast_library",
-    "summary_model": DEFAULT_SUMMARY_MODEL,
-    "summary_api_endpoint": SUMMARY_API_ENDPOINT,
 }
 
 TERM_REPLACEMENTS = [
@@ -119,16 +136,18 @@ def sanitize_filename(name: str) -> str:
 
 @dataclass(frozen=True)
 class Settings:
+    asr_provider: str
     api_key: str | None
     api_endpoint: str
     model: str
     segment_seconds: int
     workers: int
+    free_asr_chunk_minutes: int
+    free_asr_overlap_seconds: int
+    free_asr_workers: int
     output: str | None
     keep_audio: bool
     audio_bitrate: str
-    summary_api_endpoint: str
-    summary_model: str
 
 @dataclass(frozen=True)
 class Chapter:
@@ -140,7 +159,6 @@ class Chapter:
 class TranscribeResult:
     meta: "EpisodeMeta"
     output_path: Path
-    summary_path: Path | None
     duration: float
     segments: list[tuple[float, float, str]]
     transcript_text: str
@@ -220,7 +238,8 @@ def init_config(path: str | None, *, force: bool = False) -> int:
         return 1
 
     data = dict(CONFIG_TEMPLATE)
-    log("请输入硅基流动 API Key。留空会生成占位配置,之后需要手动填写。")
+    log("默认使用必剪免费 ASR,转录不需要 API Key。")
+    log("如需使用旧硅基流动转录,可在这里填写 SiliconFlow API Key；留空也可以。")
     try:
         api_key = getpass.getpass("SiliconFlow API Key: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -236,7 +255,7 @@ def init_config(path: str | None, *, force: bool = False) -> int:
     )
     log(f"✅ 已生成配置: {output.resolve()}")
     if is_placeholder_api_key(data["siliconflow_api_key"]):
-        log("⚠️  当前 API Key 仍是占位符,运行转录前需要补上真实 key。")
+        log("ℹ️  当前 API Key 仍是占位符；默认必剪 ASR 可直接转录,只有硅基流动转录才需要真实 key。")
     return 0
 
 def to_int(value, name: str) -> int:
@@ -256,8 +275,27 @@ def to_bool(value, name: str) -> bool:
             return False
     raise ValueError(f"配置项 {name} 必须是布尔值: {value!r}")
 
+def normalize_asr_provider(value: str | None) -> str:
+    provider = (value or DEFAULT_ASR_PROVIDER).strip().lower()
+    aliases = {
+        "bijian": "bcut",
+        "b-cut": "bcut",
+        "bilibili": "bcut",
+        "capcut": "jianying",
+        "jian-ying": "jianying",
+        "silicon": "siliconflow",
+        "sensevoice": "siliconflow",
+    }
+    provider = aliases.get(provider, provider)
+    if provider not in ASR_PROVIDERS:
+        raise ValueError(f"asr_provider 必须是 {', '.join(ASR_PROVIDERS)} 之一: {value!r}")
+    return provider
+
 def build_settings(args: argparse.Namespace, config: dict) -> Settings:
     """命令行参数优先,其次配置文件,最后环境变量或内置默认值。"""
+    asr_provider = normalize_asr_provider(
+        getattr(args, "asr_provider", None) or config_get(config, "asr_provider", "asr", default=DEFAULT_ASR_PROVIDER)
+    )
     file_api_key = config_get(config, "siliconflow_api_key", "api_key")
     env_api_key = os.environ.get("SILICONFLOW_API_KEY") or os.environ.get("SILICON_API_KEY")
     api_key = env_api_key if is_placeholder_api_key(file_api_key) and env_api_key else file_api_key or env_api_key
@@ -271,6 +309,27 @@ def build_settings(args: argparse.Namespace, config: dict) -> Settings:
         if args.workers is not None
         else to_int(config_get(config, "workers", default=DEFAULT_WORKERS), "workers")
     )
+    free_asr_chunk_minutes = (
+        args.free_asr_chunk_minutes
+        if getattr(args, "free_asr_chunk_minutes", None) is not None
+        else to_int(
+            config_get(config, "free_asr_chunk_minutes", default=DEFAULT_FREE_ASR_CHUNK_MINUTES),
+            "free_asr_chunk_minutes",
+        )
+    )
+    free_asr_overlap_seconds = (
+        args.free_asr_overlap_seconds
+        if getattr(args, "free_asr_overlap_seconds", None) is not None
+        else to_int(
+            config_get(config, "free_asr_overlap_seconds", default=DEFAULT_FREE_ASR_OVERLAP_SECONDS),
+            "free_asr_overlap_seconds",
+        )
+    )
+    free_asr_workers = (
+        args.free_asr_workers
+        if getattr(args, "free_asr_workers", None) is not None
+        else to_int(config_get(config, "free_asr_workers", default=DEFAULT_FREE_ASR_WORKERS), "free_asr_workers")
+    )
     keep_audio = (
         args.keep_audio
         if args.keep_audio is not None
@@ -280,22 +339,28 @@ def build_settings(args: argparse.Namespace, config: dict) -> Settings:
         raise ValueError("segment_seconds 必须大于 0")
     if workers <= 0:
         raise ValueError("workers 必须大于 0")
+    if free_asr_chunk_minutes <= 0:
+        raise ValueError("free_asr_chunk_minutes 必须大于 0")
+    if free_asr_overlap_seconds < 0:
+        raise ValueError("free_asr_overlap_seconds 不能小于 0")
+    if free_asr_workers <= 0:
+        raise ValueError("free_asr_workers 必须大于 0")
+    if free_asr_overlap_seconds >= free_asr_chunk_minutes * 60:
+        raise ValueError("free_asr_overlap_seconds 必须小于 free_asr_chunk_minutes 对应秒数")
 
     return Settings(
+        asr_provider=asr_provider,
         api_key=api_key,
         api_endpoint=args.api_endpoint or config_get(config, "api_endpoint", default=API_ENDPOINT),
         model=args.model or config_get(config, "model", default=DEFAULT_MODEL),
         segment_seconds=segment_seconds,
         workers=workers,
+        free_asr_chunk_minutes=free_asr_chunk_minutes,
+        free_asr_overlap_seconds=free_asr_overlap_seconds,
+        free_asr_workers=free_asr_workers,
         output=args.output if args.output is not None else config_get(config, "output", default=None),
         keep_audio=keep_audio,
         audio_bitrate=args.audio_bitrate or config_get(config, "audio_bitrate", default=AUDIO_BITRATE),
-        summary_api_endpoint=args.summary_api_endpoint or config_get(
-            config, "summary_api_endpoint", default=SUMMARY_API_ENDPOINT
-        ),
-        summary_model=args.summary_model or config_get(
-            config, "summary_model", default=DEFAULT_SUMMARY_MODEL
-        ),
     )
 
 # ============================================================
@@ -383,12 +448,12 @@ def check_command(command: str) -> str | None:
         return f"{command} 无法运行: {e}"
     return None
 
-def check_siliconflow(settings: Settings) -> tuple[bool, str]:
-    """检查 API 域名可达和 key 是否明显有效。"""
+def check_openai_compatible_api(api_endpoint: str, api_key: str | None, label: str) -> tuple[bool, str]:
+    """检查 OpenAI 兼容 API 域名可达和 key 是否明显有效。"""
     req = urllib.request.Request(
-        api_models_url(settings.api_endpoint),
+        api_models_url(api_endpoint),
         headers={
-            "Authorization": f"Bearer {settings.api_key}",
+            "Authorization": f"Bearer {api_key}",
             "User-Agent": "Mozilla/5.0",
         },
         method="GET",
@@ -396,16 +461,30 @@ def check_siliconflow(settings: Settings) -> tuple[bool, str]:
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             if 200 <= resp.status < 300:
-                return True, "硅基流动 API 可访问,key 已通过 /v1/models 验证。"
-            return False, f"硅基流动 API 返回异常状态码: HTTP {resp.status}"
+                return True, f"{label} API 可访问,key 已通过 /v1/models 验证。"
+            return False, f"{label} API 返回异常状态码: HTTP {resp.status}"
     except urllib.error.HTTPError as e:
         if e.code in {401, 403}:
-            return False, f"硅基流动 API Key 无效或无权限: HTTP {e.code}"
-        return True, f"硅基流动 API 可访问,但 /v1/models 返回 HTTP {e.code}; 将在转录请求时继续验证。"
+            return False, f"{label} API Key 无效或无权限: HTTP {e.code}"
+        return True, f"{label} API 可访问,但 /v1/models 返回 HTTP {e.code}; 将在请求时继续验证。"
     except Exception as e:
-        return False, f"无法访问硅基流动 API: {e}"
+        return False, f"无法访问 {label} API: {e}"
 
-def run_preflight(settings: Settings, config_path: Path | None, url: str | None) -> EpisodeMeta | None:
+def check_siliconflow(settings: Settings) -> tuple[bool, str]:
+    return check_openai_compatible_api(settings.api_endpoint, settings.api_key, "硅基流动转录")
+
+def credential_errors(settings: Settings) -> list[str]:
+    errors: list[str] = []
+    if settings.asr_provider == "siliconflow" and is_placeholder_api_key(settings.api_key):
+        errors.append("使用 --asr-provider siliconflow 时需要 siliconflow_api_key 或 SILICONFLOW_API_KEY。")
+    return errors
+
+def run_preflight(
+    settings: Settings,
+    config_path: Path | None,
+    url: str | None,
+    summary_mode: str | None = None,
+) -> EpisodeMeta | None:
     log("🧪 启动前自检...")
     errors: list[str] = []
     meta: EpisodeMeta | None = None
@@ -415,12 +494,17 @@ def run_preflight(settings: Settings, config_path: Path | None, url: str | None)
     elif os.environ.get("SILICONFLOW_API_KEY") or os.environ.get("SILICON_API_KEY"):
         log("   ✓ config.json 未找到,将使用环境变量里的 API Key")
     else:
-        errors.append("未找到 config.json,也没有 SILICONFLOW_API_KEY 环境变量。可先运行: python transcribe.py --init")
+        log("   ✓ config.json/API Key: 默认免费 ASR 不需要配置")
 
-    if is_placeholder_api_key(settings.api_key):
-        errors.append("siliconflow_api_key 为空或仍是占位符。")
+    errors.extend(credential_errors(settings))
+
+    if settings.asr_provider == "siliconflow":
+        if is_placeholder_api_key(settings.api_key):
+            pass
+        else:
+            log("   ✓ 硅基流动转录 API Key: 已填写")
     else:
-        log("   ✓ API Key: 已填写")
+        log(f"   ✓ ASR: {settings.asr_provider} 免费免配置")
 
     for command in ("ffmpeg", "ffprobe"):
         err = check_command(command)
@@ -429,12 +513,15 @@ def run_preflight(settings: Settings, config_path: Path | None, url: str | None)
         else:
             log(f"   ✓ {command}: 可用")
 
-    if not is_placeholder_api_key(settings.api_key):
+    if settings.asr_provider == "siliconflow" and not is_placeholder_api_key(settings.api_key):
         ok, message = check_siliconflow(settings)
         if ok:
             log(f"   ✓ {message}")
         else:
             errors.append(message)
+
+    if summary_mode:
+        log("   ✓ 摘要: 由本地 Agent 基于全文生成,脚本不自动总结")
 
     if url:
         try:
@@ -598,8 +685,619 @@ def build_multipart(boundary: str, file_path: Path, fields: dict) -> bytes:
     parts.append(b"\r\n--" + boundary_b + b"--\r\n")
     return b"".join(parts)
 
+def http_request(
+    url: str,
+    *,
+    method: str = "GET",
+    data: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    params: dict[str, str | int] | None = None,
+    timeout: int = 60,
+) -> tuple[bytes, object]:
+    if params:
+        query = urllib.parse.urlencode(params)
+        separator = "&" if "?" in url else "?"
+        url = f"{url}{separator}{query}"
+    req = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(), resp.headers
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"HTTP {e.code} 请求失败: {url}\n{body[:500]}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"网络请求失败: {url}\n{e}") from None
+
+def http_json_request(
+    url: str,
+    *,
+    method: str = "GET",
+    json_body: dict | None = None,
+    raw_body: bytes | str | None = None,
+    headers: dict[str, str] | None = None,
+    params: dict[str, str | int] | None = None,
+    timeout: int = 60,
+) -> tuple[dict, object]:
+    request_headers = dict(headers or {})
+    data: bytes | None = None
+    if json_body is not None:
+        data = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    elif raw_body is not None:
+        data = raw_body.encode("utf-8") if isinstance(raw_body, str) else raw_body
+    body, response_headers = http_request(
+        url,
+        method=method,
+        data=data,
+        headers=request_headers,
+        params=params,
+        timeout=timeout,
+    )
+    text = body.decode("utf-8", errors="ignore")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"接口返回不是 JSON: {text[:500]}") from None
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"接口返回 JSON 顶层不是 object: {text[:500]}")
+    return parsed, response_headers
+
+def crc32_hex(data: bytes) -> str:
+    return format(zlib.crc32(data) & 0xFFFFFFFF, "08x")
+
+def slice_with_overlap(
+    src: Path,
+    total_duration: float,
+    chunk_seconds: int,
+    overlap_seconds: int,
+    workdir: Path,
+    audio_bitrate: str,
+) -> list[Chunk]:
+    """为免费云 ASR 切长音频。短音频不切,长音频按重叠窗口切。"""
+    if total_duration <= chunk_seconds:
+        return [Chunk(path=src, offset=0.0, duration=total_duration)]
+
+    step_seconds = chunk_seconds - overlap_seconds
+    chunks: list[Chunk] = []
+    start = 0.0
+    idx = 0
+    while start < total_duration:
+        end = min(start + chunk_seconds, total_duration)
+        duration = end - start
+        if duration < 1.0:
+            break
+        path = workdir / f"free_asr_chunk_{idx:04d}.mp3"
+        run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{start:.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", str(src),
+            "-ac", "1",
+            "-b:a", audio_bitrate,
+            "-vn",
+            str(path),
+        ])
+        actual_duration = probe_duration(path)
+        chunks.append(Chunk(path=path, offset=start, duration=actual_duration))
+        idx += 1
+        if end >= total_duration:
+            break
+        start += step_seconds
+
+    log(
+        f"✂️  免费 ASR 长音频切分: {len(chunks)} 片, "
+        f"每片 {chunk_seconds // 60} 分钟,重叠 {overlap_seconds} 秒"
+    )
+    return chunks
+
+def offset_segments(
+    segments: list[tuple[float, float, str]],
+    offset: float,
+) -> list[tuple[float, float, str]]:
+    return [(start + offset, end + offset, text) for start, end, text in segments]
+
+def normalize_for_overlap(text: str) -> str:
+    return re.sub(r"\W+", "", text.lower())
+
+def segment_text_similarity(a: str, b: str) -> float:
+    left = normalize_for_overlap(a)
+    right = normalize_for_overlap(b)
+    if not left or not right:
+        return 0.0
+    if left == right:
+        return 1.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+def is_probable_overlap_duplicate(
+    candidate: tuple[float, float, str],
+    existing: tuple[float, float, str],
+    overlap_seconds: int,
+) -> bool:
+    start, end, text = candidate
+    prev_start, prev_end, prev_text = existing
+    time_overlap = min(end, prev_end) - max(start, prev_start)
+    near_overlap_window = abs(start - prev_start) <= max(2, overlap_seconds)
+    if time_overlap <= 0 and not near_overlap_window:
+        return False
+    return segment_text_similarity(text, prev_text) >= 0.82
+
+def merge_overlapped_segments(
+    segments: list[tuple[float, float, str]],
+    overlap_seconds: int,
+) -> list[tuple[float, float, str]]:
+    """合并重叠切片结果。时间重叠且文本相似时保留较早片段。"""
+    merged: list[tuple[float, float, str]] = []
+    for segment in sorted(segments, key=lambda item: (item[0], item[1])):
+        if not segment[2].strip():
+            continue
+        if any(is_probable_overlap_duplicate(segment, prev, overlap_seconds) for prev in merged[-12:]):
+            continue
+        merged.append(segment)
+    return merged
+
+def append_transcript_text(left: str, right: str) -> str:
+    left = left.strip()
+    right = right.strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if re.search(r"[，。！？!?；;：:、,.]$", left) or re.search(r"^[，。！？!?；;：:、,.]", right):
+        return left + right
+    return f"{left} {right}"
+
+def coalesce_segments(
+    segments: list[tuple[float, float, str]],
+    *,
+    max_seconds: int,
+    max_gap_seconds: float = 3.0,
+) -> list[tuple[float, float, str]]:
+    """把字幕级短句合并成更适合播客全文稿的段落。"""
+    if not segments:
+        return []
+    merged: list[tuple[float, float, str]] = []
+    cur_start: float | None = None
+    cur_end: float | None = None
+    cur_text = ""
+
+    for start, end, text in sorted(segments, key=lambda item: (item[0], item[1])):
+        text = text.strip()
+        if not text:
+            continue
+        if cur_start is None or cur_end is None:
+            cur_start, cur_end, cur_text = start, end, text
+            continue
+
+        would_duration = end - cur_start
+        gap = start - cur_end
+        if would_duration <= max_seconds and gap <= max_gap_seconds:
+            cur_end = max(cur_end, end)
+            cur_text = append_transcript_text(cur_text, text)
+        else:
+            merged.append((cur_start, cur_end, cur_text))
+            cur_start, cur_end, cur_text = start, end, text
+
+    if cur_start is not None and cur_end is not None and cur_text:
+        merged.append((cur_start, cur_end, cur_text))
+    return merged
+
+def parse_bcut_segments(resp_data: dict) -> list[tuple[float, float, str]]:
+    segments: list[tuple[float, float, str]] = []
+    for utterance in resp_data.get("utterances") or []:
+        text = (utterance.get("transcript") or "").strip()
+        if not text:
+            continue
+        start = float(utterance.get("start_time") or 0) / 1000.0
+        end = float(utterance.get("end_time") or 0) / 1000.0
+        segments.append((start, end, text))
+    return segments
+
+def transcribe_with_bcut(audio_path: Path, label: str | None = None) -> list[tuple[float, float, str]]:
+    """调用 B 站「必剪」云端 ASR。免 key,非官方接口。"""
+    file_binary = audio_path.read_bytes()
+    headers = {
+        "User-Agent": "Bilibili/1.0.0 (https://www.bilibili.com)",
+        "Content-Type": "application/json",
+    }
+
+    suffix = f" ({label})" if label else ""
+    log(f"🎙️  调用必剪 BcutASR,免费免配置{suffix}...")
+    create_resp, _ = http_json_request(
+        BCUT_API_REQ_UPLOAD,
+        method="POST",
+        json_body={
+            "type": 2,
+            "name": "audio.mp3",
+            "size": len(file_binary),
+            "ResourceFileType": "mp3",
+            "model_id": "8",
+        },
+        headers=headers,
+        timeout=60,
+    )
+    upload_info = create_resp.get("data") or {}
+    upload_urls = upload_info.get("upload_urls") or []
+    per_size = int(upload_info.get("per_size") or len(file_binary))
+    if not upload_urls:
+        raise RuntimeError(f"必剪 ASR 未返回上传地址: {create_resp}")
+
+    etags: list[str] = []
+    for idx, upload_url in enumerate(upload_urls):
+        start = idx * per_size
+        end = min((idx + 1) * per_size, len(file_binary))
+        log(f"   上传分片 {idx + 1}/{len(upload_urls)}... ", end="")
+        _, upload_headers = http_request(
+            upload_url,
+            method="PUT",
+            data=file_binary[start:end],
+            headers=headers,
+            timeout=180,
+        )
+        etag = upload_headers.get("Etag") or upload_headers.get("ETag")
+        if etag:
+            etags.append(etag)
+        log("✓")
+
+    commit_resp, _ = http_json_request(
+        BCUT_API_COMMIT_UPLOAD,
+        method="POST",
+        json_body={
+            "InBossKey": upload_info.get("in_boss_key"),
+            "ResourceId": upload_info.get("resource_id"),
+            "Etags": ",".join(etags) if etags else "",
+            "UploadId": upload_info.get("upload_id"),
+            "model_id": "8",
+        },
+        headers=headers,
+        timeout=60,
+    )
+    download_url = ((commit_resp.get("data") or {}).get("download_url") or "").strip()
+    if not download_url:
+        raise RuntimeError(f"必剪 ASR 上传提交失败: {commit_resp}")
+
+    task_resp, _ = http_json_request(
+        BCUT_API_CREATE_TASK,
+        method="POST",
+        json_body={"resource": download_url, "model_id": "8"},
+        headers=headers,
+        timeout=60,
+    )
+    task_id = ((task_resp.get("data") or {}).get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError(f"必剪 ASR 创建任务失败: {task_resp}")
+
+    for poll in range(1, 901):
+        result_resp, _ = http_json_request(
+            BCUT_API_QUERY_RESULT,
+            params={"model_id": 7, "task_id": task_id},
+            headers=headers,
+            timeout=60,
+        )
+        result_data = result_resp.get("data") or {}
+        state = result_data.get("state")
+        if state == 4:
+            result_text = result_data.get("result") or "{}"
+            try:
+                return parse_bcut_segments(json.loads(result_text))
+            except json.JSONDecodeError:
+                raise RuntimeError(f"必剪 ASR 返回结果无法解析: {result_text[:500]}") from None
+        if state in {5, 6, -1}:
+            raise RuntimeError(f"必剪 ASR 任务失败: {result_resp}")
+        if poll % 15 == 0:
+            log(f"   等待识别结果... {poll}s")
+        time.sleep(1)
+
+    raise RuntimeError("必剪 ASR 等待超时。可稍后重试,或改用 --asr-provider jianying/siliconflow。")
+
+def transcribe_with_bcut_chunked(
+    settings: Settings,
+    audio_path: Path,
+    duration: float,
+    workdir: Path,
+) -> list[tuple[float, float, str]]:
+    chunk_seconds = settings.free_asr_chunk_minutes * 60
+    if duration <= chunk_seconds:
+        return transcribe_with_bcut(audio_path)
+
+    chunks = slice_with_overlap(
+        audio_path,
+        duration,
+        chunk_seconds,
+        settings.free_asr_overlap_seconds,
+        workdir,
+        settings.audio_bitrate,
+    )
+    all_segments: list[tuple[float, float, str] | None] = []
+    ordered_results: list[list[tuple[float, float, str]] | None] = [None] * len(chunks)
+
+    def transcribe_one(idx_chunk):
+        idx, chunk = idx_chunk
+        label = f"{idx + 1}/{len(chunks)} {format_timestamp(chunk.offset)}-{format_timestamp(chunk.offset + chunk.duration)}"
+        segments = transcribe_with_bcut(chunk.path, label=label)
+        return idx, offset_segments(segments, chunk.offset)
+
+    max_workers = min(settings.free_asr_workers, len(chunks))
+    log(f"🚀 BcutASR 分片并发: {max_workers},切片数 {len(chunks)}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(transcribe_one, (idx, chunk)): idx for idx, chunk in enumerate(chunks)}
+        for future in concurrent.futures.as_completed(futures):
+            idx, segments = future.result()
+            ordered_results[idx] = segments
+            log(f"   Bcut 分片 {idx + 1}/{len(chunks)} 完成: {len(segments)} 段")
+
+    for segments in ordered_results:
+        if segments:
+            all_segments.extend(segments)
+    merged = merge_overlapped_segments(
+        [segment for segment in all_segments if segment is not None],
+        settings.free_asr_overlap_seconds,
+    )
+    log(f"🔗 BcutASR 合并完成: {len(all_segments)} 段 -> {len(merged)} 段")
+    return merged
+
+def jianying_tdid() -> str:
+    year_digit = str(datetime.now().year)[3]
+    prefix = 390 + int(year_digit)
+    suffix = "3278516897751" if int(year_digit) % 2 != 0 else f"{uuid.getnode():013d}"
+    return f"{prefix}{suffix}"
+
+def jianying_sign(path: str, tdid: str) -> tuple[str, str]:
+    current_time = str(int(time.time()))
+    resp, _ = http_json_request(
+        JIANYING_SIGN_URL,
+        method="POST",
+        json_body={
+            "url": path,
+            "current_time": current_time,
+            "pf": "4",
+            "appvr": "6.6.0",
+            "tdid": tdid,
+        },
+        headers={
+            "User-Agent": "PodScribe/1.0",
+            "tdid": tdid,
+            "t": current_time,
+        },
+        timeout=30,
+    )
+    sign_value = (resp.get("sign") or "").strip()
+    if not sign_value:
+        raise RuntimeError(f"剪映签名服务未返回 sign: {resp}")
+    return sign_value.lower(), current_time
+
+def jianying_headers(path: str, tdid: str) -> dict[str, str]:
+    sign_value, device_time = jianying_sign(path, tdid)
+    return {
+        "User-Agent": "Cronet/TTNetVersion:d4572e53 2024-06-12 QuicVersion:4bf243e0 2023-04-17",
+        "appvr": "6.6.0",
+        "device-time": device_time,
+        "pf": "4",
+        "sign": sign_value,
+        "sign-ver": "1",
+        "tdid": tdid,
+    }
+
+def hmac_sign(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+def aws_signature_key(secret_key: str, date_stamp: str, region_name: str, service_name: str) -> bytes:
+    k_date = hmac_sign(("AWS4" + secret_key).encode("utf-8"), date_stamp)
+    k_region = hmac_sign(k_date, region_name)
+    k_service = hmac_sign(k_region, service_name)
+    return hmac_sign(k_service, "aws4_request")
+
+def aws_signature(
+    secret_key: str,
+    request_parameters: str,
+    headers: dict[str, str],
+    method: str = "GET",
+    payload: str = "",
+    region: str = "cn",
+    service: str = "vod",
+) -> str:
+    canonical_headers = "\n".join([f"{key}:{value}" for key, value in headers.items()]) + "\n"
+    signed_headers = ";".join(headers.keys())
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    canonical_request = (
+        f"{method}\n/\n{request_parameters}\n"
+        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    )
+    amz_date = headers["x-amz-date"]
+    date_stamp = amz_date.split("T")[0]
+    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = (
+        "AWS4-HMAC-SHA256\n"
+        f"{amz_date}\n{credential_scope}\n"
+        f"{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
+    )
+    signing_key = aws_signature_key(secret_key, date_stamp, region, service)
+    return hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def parse_jianying_segments(resp_data: dict) -> list[tuple[float, float, str]]:
+    segments: list[tuple[float, float, str]] = []
+    for utterance in ((resp_data.get("data") or {}).get("utterances") or []):
+        text = (utterance.get("text") or "").strip()
+        if not text:
+            continue
+        start = float(utterance.get("start_time") or 0) / 1000.0
+        end = float(utterance.get("end_time") or 0) / 1000.0
+        segments.append((start, end, text))
+    return segments
+
+def transcribe_with_jianying(audio_path: Path, duration: float) -> list[tuple[float, float, str]]:
+    """调用字节「剪映」云端 ASR。依赖 VideoCaptioner 公共签名服务。"""
+    file_binary = audio_path.read_bytes()
+    crc = crc32_hex(file_binary)
+    tdid = jianying_tdid()
+
+    log("🎙️  调用剪映 JianYingASR,免费免配置(依赖公共签名服务)...")
+    upload_sign, _ = http_json_request(
+        JIANYING_API_BASE_URL + "/lv/v1/upload_sign",
+        method="POST",
+        json_body={"biz": "pc-recognition"},
+        headers=jianying_headers("/lv/v1/upload_sign", tdid),
+        timeout=60,
+    )
+    upload_data = upload_sign.get("data") or {}
+    access_key = upload_data.get("access_key_id")
+    secret_key = upload_data.get("secret_access_key")
+    session_token = upload_data.get("session_token")
+    if not (access_key and secret_key and session_token):
+        raise RuntimeError(f"剪映 upload_sign 返回异常: {upload_sign}")
+
+    request_parameters = (
+        f"Action=ApplyUploadInner&FileSize={len(file_binary)}&FileType=object&IsInner=1"
+        "&SpaceName=lv-mac-recognition&Version=2020-11-19&s=5y0udbjapi"
+    )
+    now_utc = datetime.now(timezone.utc)
+    amz_date = now_utc.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now_utc.strftime("%Y%m%d")
+    auth_headers = {"x-amz-date": amz_date, "x-amz-security-token": session_token}
+    signature = aws_signature(secret_key, request_parameters, auth_headers)
+    auth_headers["authorization"] = (
+        f"AWS4-HMAC-SHA256 Credential={access_key}/{date_stamp}/cn/vod/aws4_request, "
+        f"SignedHeaders=x-amz-date;x-amz-security-token, Signature={signature}"
+    )
+    store_infos, _ = http_json_request(
+        f"https://vod.bytedanceapi.com/?{request_parameters}",
+        headers=auth_headers,
+        timeout=60,
+    )
+    upload_address = ((store_infos.get("Result") or {}).get("UploadAddress") or {})
+    store_info = (upload_address.get("StoreInfos") or [{}])[0]
+    store_uri = store_info.get("StoreUri")
+    auth = store_info.get("Auth")
+    upload_id = store_info.get("UploadID")
+    session_key = upload_address.get("SessionKey")
+    upload_host = (upload_address.get("UploadHosts") or [""])[0]
+    if not (store_uri and auth and upload_id and session_key and upload_host):
+        raise RuntimeError(f"剪映上传授权返回异常: {store_infos}")
+
+    upload_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Authorization": auth,
+        "Content-CRC32": crc,
+    }
+    upload_url = f"https://{upload_host}/{store_uri}?partNumber=1&uploadID={upload_id}"
+    upload_resp, _ = http_json_request(
+        upload_url,
+        method="PUT",
+        raw_body=file_binary,
+        headers=upload_headers,
+        timeout=300,
+    )
+    if upload_resp.get("success") != 0:
+        raise RuntimeError(f"剪映上传文件失败: {upload_resp}")
+
+    check_url = f"https://{upload_host}/{store_uri}?uploadID={upload_id}"
+    http_json_request(
+        check_url,
+        method="POST",
+        raw_body=f"1:{crc}",
+        headers=upload_headers,
+        timeout=60,
+    )
+    commit_url = (
+        f"https://{upload_host}/{store_uri}?uploadID={upload_id}"
+        f"&partNumber=1&x-amz-security-token={urllib.parse.quote(str(session_token))}"
+    )
+    http_request(commit_url, method="PUT", data=file_binary, headers=upload_headers, timeout=300)
+
+    submit_payload = {
+        "adjust_endtime": 200,
+        "audio": store_uri,
+        "caption_type": 2,
+        "client_request_id": str(uuid.uuid4()),
+        "max_lines": 1,
+        "songs_info": [{"end_time": int(duration * 1000), "id": "", "start_time": 0}],
+        "words_per_line": 16,
+    }
+    submit_resp, _ = http_json_request(
+        JIANYING_API_BASE_URL + "/lv/v1/audio_subtitle/submit",
+        method="POST",
+        json_body=submit_payload,
+        headers=jianying_headers("/lv/v1/audio_subtitle/submit", tdid),
+        timeout=60,
+    )
+    if submit_resp.get("ret") != "0":
+        raise RuntimeError(f"剪映 ASR 提交失败: {submit_resp}")
+    query_id = ((submit_resp.get("data") or {}).get("id") or "").strip()
+    if not query_id:
+        raise RuntimeError(f"剪映 ASR 未返回任务 id: {submit_resp}")
+
+    for poll in range(1, 181):
+        query_resp, _ = http_json_request(
+            JIANYING_API_BASE_URL + "/lv/v1/audio_subtitle/query",
+            method="POST",
+            json_body={"id": query_id, "pack_options": {"need_attribute": True}},
+            headers=jianying_headers("/lv/v1/audio_subtitle/query", tdid),
+            timeout=60,
+        )
+        if query_resp.get("ret") != "0":
+            raise RuntimeError(f"剪映 ASR 查询失败: {query_resp}")
+        if "utterances" in (query_resp.get("data") or {}):
+            return parse_jianying_segments(query_resp)
+        if poll % 10 == 0:
+            log(f"   等待剪映识别结果... {poll * 2}s")
+        time.sleep(2)
+
+    raise RuntimeError("剪映 ASR 等待超时。可稍后重试,或改用 --asr-provider bcut/siliconflow。")
+
+def transcribe_with_siliconflow(
+    settings: Settings,
+    mono_path: Path,
+    duration: float,
+    workdir: Path,
+) -> list[tuple[float, float, str]]:
+    if is_placeholder_api_key(settings.api_key):
+        raise RuntimeError("硅基流动转录需要 siliconflow_api_key 或 SILICONFLOW_API_KEY。")
+    t3 = time.time()
+    chunks = slice_by_duration(mono_path, duration, settings.segment_seconds, workdir)
+    log(f"   ⏱ 切片耗时: {time.time() - t3:.1f}s")
+
+    log(f"🎙️  调用硅基流动 ({settings.model}),并发数 {settings.workers}...")
+    maybe_segments: list[tuple[float, float, str] | None] = [None] * len(chunks)
+
+    def transcribe_one(idx_chunk):
+        i, chunk = idx_chunk
+        log(f"   段 {i+1}/{len(chunks)} [{format_timestamp(chunk.offset)}]... ", end="")
+        text = transcribe_chunk(chunk, settings.api_key or "", settings.api_endpoint, settings.model)
+        log(f"✓ ({len(text)} 字)")
+        return i, chunk, text
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=settings.workers) as executor:
+        futures = {executor.submit(transcribe_one, (i, chunk)): i for i, chunk in enumerate(chunks)}
+        for future in concurrent.futures.as_completed(futures):
+            i, chunk, text = future.result()
+            maybe_segments[i] = (chunk.offset, chunk.offset + chunk.duration, text)
+
+    return [segment for segment in maybe_segments if segment is not None]
+
+def transcribe_with_provider(
+    settings: Settings,
+    mono_path: Path,
+    duration: float,
+    workdir: Path,
+) -> list[tuple[float, float, str]]:
+    if settings.asr_provider == "bcut":
+        return transcribe_with_bcut_chunked(settings, mono_path, duration, workdir)
+    if settings.asr_provider == "jianying":
+        return transcribe_with_jianying(mono_path, duration)
+    if settings.asr_provider == "siliconflow":
+        return transcribe_with_siliconflow(settings, mono_path, duration, workdir)
+    raise RuntimeError(f"未知 ASR provider: {settings.asr_provider}")
+
+def provider_display_name(settings: Settings) -> str:
+    if settings.asr_provider == "siliconflow":
+        return settings.model
+    if settings.asr_provider == "bcut":
+        return "BcutASR (必剪)"
+    if settings.asr_provider == "jianying":
+        return "JianYingASR (剪映)"
+    return settings.asr_provider
+
 # ============================================================
-# Step 4: 清洗、章节和摘要
+# Step 4: 清洗和章节
 # ============================================================
 
 def clean_transcript_text(text: str) -> str:
@@ -609,19 +1307,6 @@ def clean_transcript_text(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = re.sub(r"([。！？!?])\1+", r"\1", cleaned)
     return cleaned.strip()
-
-def transcript_for_prompt(segments: list[tuple[float, float, str]], max_chars: int = 52000) -> str:
-    lines = [
-        f"[{format_timestamp(start)} - {format_timestamp(end)}] {text}"
-        for start, end, text in segments
-        if text
-    ]
-    transcript = "\n".join(lines)
-    if len(transcript) <= max_chars:
-        return transcript
-    head = transcript[: max_chars // 2]
-    tail = transcript[-max_chars // 2 :]
-    return head + "\n\n...[中间内容过长,已截断]...\n\n" + tail
 
 def infer_chapter_title(text: str) -> str:
     rules = [
@@ -680,179 +1365,6 @@ def build_chapters(
         chapters.append(Chapter(bucket_start, bucket_end, infer_chapter_title(joined)))
 
     return chapters
-
-def summary_mode_instruction(mode: str) -> str:
-    instructions = {
-        "brief": "写给只想 3 分钟看完的人。保持精炼,少解释。",
-        "deep": "写成深度笔记。保留论证链条、关键概念、例子和潜在反驳。",
-        "product": "从产品经理视角总结。重点提炼用户、场景、需求、产品形态、迭代机会和风险。",
-        "investment": "从投资视角总结。重点提炼产业结构、价值捕获、商业模式、公司规模和投资含义。",
-        "obsidian": "输出 Obsidian 笔记格式。包含 properties、标签、双链风格标题和可复习要点。",
-    }
-    return instructions[mode]
-
-def call_summary_model(
-    settings: Settings,
-    title: str,
-    source_url: str,
-    duration: float,
-    segments: list[tuple[float, float, str]],
-    mode: str,
-) -> str:
-    transcript = transcript_for_prompt(segments)
-    prompt = f"""请基于下面的播客文字稿生成中文 Markdown 摘要。
-
-标题: {title}
-来源: {source_url}
-时长: {format_timestamp(duration)}
-摘要模式: {mode}
-模式要求: {summary_mode_instruction(mode)}
-
-必须包含这些小节:
-- 一句话总结
-- 核心观点
-- 时间线
-- 金句和例子
-- 适合谁听
-
-要求:
-- 不要编造文字稿里没有的信息。
-- 时间线必须带时间戳。
-- 如果转录里有明显识别错误,按上下文修正术语后表达。
-- 只输出 Markdown 正文。
-
-文字稿:
-{transcript}
-"""
-    body = json.dumps(
-        {
-            "model": settings.summary_model,
-            "messages": [
-                {"role": "system", "content": "你是擅长产品、商业和播客笔记的中文编辑。"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 3200 if mode in {"deep", "product", "investment", "obsidian"} else 1800,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        settings.summary_api_endpoint,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {settings.api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    choices = data.get("choices") or []
-    if not choices:
-        raise RuntimeError("摘要接口没有返回 choices")
-    message = choices[0].get("message") or {}
-    content = message.get("content") or choices[0].get("text")
-    if not content:
-        raise RuntimeError("摘要接口没有返回正文")
-    return content.strip()
-
-def select_example_segments(segments: list[tuple[float, float, str]], limit: int = 3) -> list[str]:
-    examples: list[str] = []
-    for start, _end, text in segments:
-        if not text:
-            continue
-        if any(marker in text for marker in ("比如", "我觉得", "核心", "价值", "例子")):
-            snippet = text.strip()
-            if len(snippet) > 90:
-                snippet = snippet[:90] + "..."
-            examples.append(f"- **{format_timestamp(start)}** {snippet}")
-        if len(examples) >= limit:
-            break
-    return examples
-
-def fallback_summary(
-    title: str,
-    source_url: str,
-    duration: float,
-    segments: list[tuple[float, float, str]],
-    chapters: list[Chapter],
-    mode: str,
-    reason: str,
-) -> str:
-    text = " ".join(segment[2] for segment in segments if segment[2])
-    points = [
-        "AI coding 正在把软件创作成本打下来,小团队和个人可以快速做出自己需要的小工具。",
-        "通用生产力价值可能被少数模型公司拿走,传统中型软件公司的壁垒会被削弱。",
-        "长尾软件会更像内容、文化或体验产品,情绪价值、审美和个人 taste 会变得更重要。",
-        "新的创作者群体需要新的连接网络,让作品被看见、被对的人认可,再进一步产生回报。",
-    ]
-    if "交易" in text or "Polymarket" in text or "Web3" in text:
-        points.append("AI 策略、预测市场和 Web3 被讨论为更直接的 token 到经济价值路径。")
-    if mode == "product":
-        points.append("产品机会集中在配置、部署、发现、增长和创作者连接这些基础能力上。")
-    if mode == "investment":
-        points.append("投资回报形式可能从押注中心化大公司,转向更分散的小团队现金流或文化产业式组合。")
-
-    timeline = [
-        f"- **{format_timestamp(chapter.start)}** {chapter.title}"
-        for chapter in chapters
-    ]
-    examples = select_example_segments(segments)
-
-    return "\n".join([
-        f"# {title} - {mode} 摘要",
-        "",
-        f"- **来源**: {source_url}",
-        f"- **时长**: {format_timestamp(duration)}",
-        "- **生成方式**: 本地规则摘要",
-        f"- **说明**: 摘要模型调用失败,已用本地规则兜底。失败原因: {reason}",
-        "",
-        "## 一句话总结",
-        "",
-        "这期在讨论 AI coding 之后,软件从标准化工具变成个人和小团队可创作的体验型作品时,行业结构、产品形态和商业模式会如何变化。",
-        "",
-        "## 核心观点",
-        "",
-        *[f"- {point}" for point in points],
-        "",
-        "## 时间线",
-        "",
-        *(timeline or ["- 暂无章节信息"]),
-        "",
-        "## 金句和例子",
-        "",
-        *(examples or ["- 暂无可提取例子"]),
-        "",
-        "## 适合谁听",
-        "",
-        "- 正在做 AI 产品、开发者工具、创作者社区、独立开发或早期投资判断的人。",
-    ])
-
-def generate_summary(
-    settings: Settings,
-    title: str,
-    source_url: str,
-    duration: float,
-    segments: list[tuple[float, float, str]],
-    mode: str,
-    chapters: list[Chapter],
-) -> str:
-    try:
-        log(f"🧠 生成摘要 ({mode}, {settings.summary_model})...")
-        return call_summary_model(settings, title, source_url, duration, segments, mode)
-    except Exception as e:
-        log(f"   ⚠️ 摘要模型调用失败,改用本地规则摘要: {e}")
-        return fallback_summary(title, source_url, duration, segments, chapters, mode, str(e))
-
-def summary_output_path(transcript_path: Path, mode: str, override: str | None) -> Path:
-    if override:
-        return Path(override)
-    suffix = ".obsidian.md" if mode == "obsidian" else f".summary.{mode}.md"
-    return transcript_path.with_name(transcript_path.stem + suffix)
-
-def write_summary(output: Path, content: str) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(content.rstrip() + "\n", encoding="utf-8")
 
 # ============================================================
 # Step 5: 输出 Markdown
@@ -914,7 +1426,6 @@ def transcribe_episode(
     preflight_meta: EpisodeMeta | None = None,
     output_path: Path | None = None,
     summary_mode: str | None = None,
-    summary_output: str | None = None,
     chapters_enabled: bool = False,
     chapter_window: int = 300,
     clean: bool = True,
@@ -948,29 +1459,8 @@ def transcribe_episode(
         transcode_mono(raw_path, mono_path, settings.audio_bitrate)
         log(f"   ⏱ 转码耗时: {time.time() - t2:.1f}s")
 
-        t3 = time.time()
-        chunks = slice_by_duration(mono_path, duration, settings.segment_seconds, workdir)
-        log(f"   ⏱ 切片耗时: {time.time() - t3:.1f}s")
-
         t4 = time.time()
-        log(f"🎙️  调用硅基流动 ({settings.model}),并发数 {settings.workers}...")
-        maybe_segments: list[tuple[float, float, str] | None] = [None] * len(chunks)
-
-        def transcribe_one(idx_chunk):
-            i, chunk = idx_chunk
-            log(f"   段 {i+1}/{len(chunks)} [{format_timestamp(chunk.offset)}]... ", end="")
-            text = transcribe_chunk(chunk, settings.api_key, settings.api_endpoint, settings.model)
-            log(f"✓ ({len(text)} 字)")
-            return i, chunk, text
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=settings.workers) as executor:
-            futures = {executor.submit(transcribe_one, (i, chunk)): i
-                       for i, chunk in enumerate(chunks)}
-            for future in concurrent.futures.as_completed(futures):
-                i, chunk, text = future.result()
-                maybe_segments[i] = (chunk.offset, chunk.offset + chunk.duration, text)
-
-        segments = [segment for segment in maybe_segments if segment is not None]
+        segments = transcribe_with_provider(settings, mono_path, duration, workdir)
         log(f"   ⏱ 转录耗时: {time.time() - t4:.1f}s")
 
         if clean:
@@ -978,6 +1468,11 @@ def transcribe_episode(
                 (start, end, clean_transcript_text(text))
                 for start, end, text in segments
             ]
+
+        before_coalesce = len(segments)
+        segments = coalesce_segments(segments, max_seconds=settings.segment_seconds)
+        if len(segments) != before_coalesce:
+            log(f"🧩 合并短句: {before_coalesce} 段 -> {len(segments)} 段")
 
         chapters = build_chapters(segments, window_seconds=chapter_window) if (chapters_enabled or summary_mode) else []
 
@@ -990,24 +1485,12 @@ def transcribe_episode(
             source_url,
             duration,
             segments,
-            settings.model,
+            provider_display_name(settings),
             chapters=chapters if chapters_enabled else None,
         )
 
-        summary_path: Path | None = None
         if summary_mode:
-            summary = generate_summary(
-                settings,
-                meta.title,
-                source_url,
-                duration,
-                segments,
-                summary_mode,
-                chapters,
-            )
-            summary_path = summary_output_path(output_path, summary_mode, summary_output)
-            write_summary(summary_path, summary)
-            log(f"📝 摘要: {summary_path.resolve()}")
+            log("📝 脚本已完成转录；请让本地 Agent 基于全文稿生成摘要。")
 
         transcript_text = segments_to_index_text(segments)
         log(f"\n✅ 完成! 总耗时: {time.time() - t0:.1f}s")
@@ -1018,11 +1501,10 @@ def transcribe_episode(
         return TranscribeResult(
             meta=meta,
             output_path=output_path,
-            summary_path=summary_path,
             duration=duration,
             segments=segments,
             transcript_text=transcript_text,
-            model=settings.model,
+            model=provider_display_name(settings),
         )
 
     finally:
@@ -1134,7 +1616,6 @@ def ensure_library_schema(conn: sqlite3.Connection) -> None:
             episode_no TEXT,
             status TEXT NOT NULL DEFAULT 'discovered',
             transcript_path TEXT,
-            summary_path TEXT,
             transcript_text TEXT NOT NULL DEFAULT '',
             duration_seconds REAL,
             model TEXT,
@@ -1484,7 +1965,6 @@ def update_episode_after_transcribe(
         UPDATE episodes SET
             status = 'indexed',
             transcript_path = ?,
-            summary_path = ?,
             transcript_text = ?,
             duration_seconds = ?,
             model = ?,
@@ -1494,7 +1974,6 @@ def update_episode_after_transcribe(
         """,
         (
             str(result.output_path.resolve()),
-            str(result.summary_path.resolve()) if result.summary_path else None,
             result.transcript_text,
             result.duration,
             result.model,
@@ -1653,25 +2132,15 @@ def rss_subs(args: argparse.Namespace, config: dict) -> int:
     return 0
 
 
-def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
-    """扫描 podscribe-feeds/*.json,批量添加未入库的播客并同步。"""
-    # 确定 feeds 目录位置
-    script_dir = Path(__file__).resolve().parent
-    feeds_dir = Path(args.feeds_dir) if args.feeds_dir else script_dir / "podscribe-feeds"
-
-    if not feeds_dir.is_dir():
-        print(f"❌ 未找到 feeds 目录: {feeds_dir}")
-        print(f"请创建 {feeds_dir} 目录并在其中放置分类 JSON 文件。")
-        return 1
-
-    # 扫描所有 JSON 文件
-    json_files = sorted(feeds_dir.glob("*.json"))
-    if not json_files:
-        print(f"❌ feeds 目录中没有 JSON 文件: {feeds_dir}")
-        return 1
-
-    # 收集所有 feeds
+def _load_feeds_catalog(feeds_dir: Path) -> list[dict]:
+    """扫描 feeds 目录下的 *.json,返回所有条目(附带 _source_file 和 _category)."""
     all_entries: list[dict] = []
+    # 支持 feeds_dir/feeds/ 子目录和 feeds_dir/ 直接放置两种结构
+    json_files = sorted(feeds_dir.glob("*.json"))
+    feeds_sub = feeds_dir / "feeds"
+    if feeds_sub.is_dir():
+        json_files = sorted(feeds_sub.glob("*.json"))
+
     for jf in json_files:
         try:
             data = json.loads(jf.read_text(encoding="utf-8"))
@@ -1679,11 +2148,180 @@ def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | N
                 for entry in data:
                     if entry.get("name") and entry.get("rss_url"):
                         entry["_source_file"] = jf.name
+                        entry["_category"] = entry.get("category", jf.stem)
                         all_entries.append(entry)
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"⚠️  跳过 {jf.name}: {e}")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return all_entries
 
-    print(f"podscribe-feeds 共 {len(json_files)} 个分类, {len(all_entries)} 个播客\n")
+
+def rss_browse_feeds(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    """列出 feeds 目录下所有播客,按分类展示,标注已订阅/未订阅状态."""
+    script_dir = Path(__file__).resolve().parent
+    feeds_dir = Path(args.feeds_dir) if args.feeds_dir else script_dir / "podscribe-feeds"
+
+    if not feeds_dir.is_dir():
+        print(f"未找到 feeds 目录: {feeds_dir}")
+        return 1
+
+    all_entries = _load_feeds_catalog(feeds_dir)
+    if not all_entries:
+        print(f"feeds 目录中没有播客: {feeds_dir}")
+        return 1
+
+    # 检查哪些已订阅
+    root = library_root(config, args.library_dir)
+    subscribed_names: set[str] = set()
+    if root.exists():
+        with open_library(root) as conn:
+            rows = conn.execute("SELECT name FROM subscriptions").fetchall()
+            subscribed_names = {r["name"] for r in rows}
+
+    # 按分类分组
+    categories: dict[str, list[dict]] = {}
+    for entry in all_entries:
+        cat = entry.get("_category", "uncategorized")
+        categories.setdefault(cat, []).append(entry)
+
+    total = len(all_entries)
+    sub_count = 0
+    unsub_count = 0
+
+    for cat, entries in categories.items():
+        print(f"\n--- {cat} ({len(entries)}) ---")
+        for e in entries:
+            name = e["name"]
+            # 模糊匹配: feeds 里的名字可能跟 subscriptions 里的略有不同
+            is_subbed = any(name in sn or sn in name for sn in subscribed_names)
+            if is_subbed:
+                sub_count += 1
+                status = "[已订阅]"
+            else:
+                unsub_count += 1
+                status = "[未订阅]"
+            note = f"  {e.get('note', '')}" if e.get("note") else ""
+            print(f"  {status} {name}{note}")
+
+    print(f"\n共 {total} 个播客: {sub_count} 已订阅, {unsub_count} 未订阅")
+    print(f"用 rss add-from-feeds \"播客名\" 选择订阅")
+    return 0
+
+
+def rss_add_from_feeds(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    """从 feeds 目录中按名字挑选播客,加入订阅并同步."""
+    script_dir = Path(__file__).resolve().parent
+    feeds_dir = Path(args.feeds_dir) if args.feeds_dir else script_dir / "podscribe-feeds"
+
+    if not feeds_dir.is_dir():
+        print(f"未找到 feeds 目录: {feeds_dir}")
+        return 1
+
+    all_entries = _load_feeds_catalog(feeds_dir)
+    if not all_entries:
+        print(f"feeds 目录中没有播客: {feeds_dir}")
+        return 1
+
+    target = args.name
+
+    # 模糊匹配: 支持部分名字匹配
+    matches = [e for e in all_entries if target in e["name"] or e["name"] in target]
+    if not matches:
+        # 再试试不分大小写的匹配
+        target_lower = target.lower()
+        matches = [e for e in all_entries if target_lower in e["name"].lower()]
+    if not matches:
+        print(f"未找到匹配的播客: {target}")
+        print("可用播客:")
+        for e in all_entries:
+            print(f"  {e['name']} ({e.get('_category', '?')})")
+        return 1
+
+    if len(matches) > 1:
+        print(f"找到多个匹配:")
+        for i, m in enumerate(matches, 1):
+            note = f"  {m.get('note', '')}" if m.get("note") else ""
+            print(f"  [{i}] {m['name']} ({m.get('_category', '?')}){note}")
+        print(f"\n请用更精确的名字,例如: rss add-from-feeds \"{matches[0]['name']}\"")
+        return 1
+
+    entry = matches[0]
+    name = entry["name"]
+    rss_url = entry["rss_url"]
+    category = entry.get("_category", "")
+
+    # 检查是否已订阅
+    root = library_root(config, args.library_dir)
+    with open_library(root) as conn:
+        existing = get_subscription(conn, name)
+        if existing:
+            ep_count = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE subscription_id = ?", (existing["id"],)
+            ).fetchone()[0]
+            if ep_count > 0:
+                print(f"已订阅: {name} ({ep_count} 期)")
+                return 0
+            # 有订阅但无数据,重试同步
+            subscription = existing
+            print(f"重试同步: {name}")
+        else:
+            # 添加新订阅
+            add_subscription(conn, name, rss_url)
+            subscription = get_required_subscription(conn, name)
+            print(f"已添加: {name}")
+
+        # 同步
+        limit = args.limit if args.limit else 50
+        print(f"同步中...")
+        podcast_title, episodes = parse_rss_feed(fetch_text(rss_url))
+        selected = filter_feed_episodes(episodes, limit=limit, days=None)
+        new_count, updated_count = sync_subscription(conn, subscription, selected)
+        upsert_subscription_json(config_path, name, rss_url, last_synced=utc_now_iso())
+
+    if category:
+        print(f"分类: {category}")
+    print(f"入库: {new_count} 期")
+    print(f"库目录: {root.resolve()}")
+    return 0
+
+
+def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    """扫描 podscribe-feeds/*.json,批量添加未入库的播客并同步。需要 --all 或 --category 指定范围。"""
+    # 确定 feeds 目录位置
+    script_dir = Path(__file__).resolve().parent
+    feeds_dir = Path(args.feeds_dir) if args.feeds_dir else script_dir / "podscribe-feeds"
+
+    if not feeds_dir.is_dir():
+        print(f"未找到 feeds 目录: {feeds_dir}")
+        print(f"请创建 {feeds_dir} 目录并在其中放置分类 JSON 文件。")
+        return 1
+
+    all_entries = _load_feeds_catalog(feeds_dir)
+    if not all_entries:
+        print(f"feeds 目录中没有播客: {feeds_dir}")
+        return 1
+
+    # 按 --all / --category 过滤
+    category_filter = getattr(args, "category", None)
+    import_all = getattr(args, "all", False)
+
+    if not import_all and not category_filter:
+        print("请指定导入范围:")
+        print(f"  --all          导入全部 {len(all_entries)} 个播客")
+        print(f"  --category AI  只导入指定分类")
+        print(f"  rss browse-feeds  先看看有哪些可选")
+        return 1
+
+    if category_filter:
+        filtered = [e for e in all_entries if e.get("_category", "").lower() == category_filter.lower()]
+        if not filtered:
+            cats = sorted(set(e.get("_category", "?") for e in all_entries))
+            print(f"分类 '{category_filter}' 没有匹配的播客")
+            print(f"可用分类: {', '.join(cats)}")
+            return 1
+        all_entries = filtered
+        print(f"按分类 '{category_filter}' 过滤,共 {len(all_entries)} 个播客\n")
+    else:
+        print(f"全部导入,共 {len(all_entries)} 个播客\n")
 
     root = library_root(config, args.library_dir)
     added = 0
@@ -1735,11 +2373,14 @@ def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | N
 def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | None) -> int:
     root = library_root(config, args.library_dir)
     settings = build_settings(args, config)
-    if is_placeholder_api_key(settings.api_key):
-        log("❌ 缺少硅基流动 API Key。转录前请运行 --init 或设置 SILICONFLOW_API_KEY。")
+    errors = credential_errors(settings)
+    if errors:
+        log("❌ 配置缺少必要凭据:")
+        for error in errors:
+            log(f"   - {error}")
         return 1
     if not args.skip_preflight:
-        run_preflight(settings, config_path, None)
+        run_preflight(settings, config_path, None, args.summary)
 
     with open_library(root) as conn:
         subscription = get_required_subscription(conn, args.name)
@@ -1749,8 +2390,6 @@ def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | N
         if episode["status"] == "indexed" and episode["transcript_path"] and not args.force:
             print(f"已转录: [{episode_label(episode)}] {episode['title']}")
             print(episode["transcript_path"])
-            if episode["summary_path"]:
-                print(episode["summary_path"])
             return 0
         if not episode["audio_url"]:
             raise RuntimeError(f"这期 RSS 没有 audio enclosure,无法转录: {episode['title']}")
@@ -1768,7 +2407,6 @@ def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | N
             preflight_meta=meta,
             output_path=output_path,
             summary_mode=args.summary,
-            summary_output=args.summary_output,
             chapters_enabled=args.chapters,
             chapter_window=args.chapter_window,
             clean=args.clean,
@@ -1776,8 +2414,6 @@ def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | N
         update_episode_after_transcribe(conn, episode["id"], result)
 
     print(result.output_path.resolve())
-    if result.summary_path:
-        print(result.summary_path.resolve())
     return 0
 
 def rss_search(args: argparse.Namespace, config: dict) -> int:
@@ -1875,10 +2511,18 @@ def rss_main(argv: list[str]) -> int:
                                    help=f"分段时长(秒),默认 {DEFAULT_SEGMENT_SECONDS}")
     transcribe_parser.add_argument("--workers", type=int, default=None,
                                    help=f"并发请求数,默认 {DEFAULT_WORKERS}")
+    transcribe_parser.add_argument("--asr-provider", choices=ASR_PROVIDERS, default=None,
+                                   help=f"ASR 引擎,默认 {DEFAULT_ASR_PROVIDER}; bcut/jianying 免费免配置,siliconflow 为旧兼容接口")
+    transcribe_parser.add_argument("--free-asr-chunk-minutes", type=int, default=None,
+                                   help=f"免费 ASR 长音频切片分钟数,默认 {DEFAULT_FREE_ASR_CHUNK_MINUTES}")
+    transcribe_parser.add_argument("--free-asr-overlap-seconds", type=int, default=None,
+                                   help=f"免费 ASR 切片重叠秒数,默认 {DEFAULT_FREE_ASR_OVERLAP_SECONDS}")
+    transcribe_parser.add_argument("--free-asr-workers", type=int, default=None,
+                                   help=f"免费 ASR 分片并发数,默认 {DEFAULT_FREE_ASR_WORKERS}")
     transcribe_parser.add_argument("--model", default=None,
-                                   help=f"转录模型,默认 {DEFAULT_MODEL}")
+                                   help=f"siliconflow provider 使用的转录模型,默认 {DEFAULT_MODEL}")
     transcribe_parser.add_argument("--api-endpoint", default=None,
-                                   help=f"转录 API endpoint,默认 {API_ENDPOINT}")
+                                   help=f"siliconflow provider 使用的 endpoint,默认 {API_ENDPOINT}")
     transcribe_parser.add_argument("--audio-bitrate", default=None,
                                    help=f"转码后的音频码率,默认 {AUDIO_BITRATE}")
     transcribe_parser.add_argument("--keep-audio", action=argparse.BooleanOptionalAction,
@@ -1889,13 +2533,7 @@ def rss_main(argv: list[str]) -> int:
     transcribe_parser.add_argument("--chapter-window", type=int, default=300,
                                    help="自动章节的时间窗口秒数,默认 300")
     transcribe_parser.add_argument("--summary", nargs="?", const="brief", choices=SUMMARY_MODES,
-                                   default=None, help="转录后生成摘要")
-    transcribe_parser.add_argument("--summary-output", default=None,
-                                   help="摘要输出路径,默认在全文稿同目录生成")
-    transcribe_parser.add_argument("--summary-model", default=None,
-                                   help=f"摘要模型,默认 {DEFAULT_SUMMARY_MODEL}")
-    transcribe_parser.add_argument("--summary-api-endpoint", default=None,
-                                   help=f"摘要 API endpoint,默认 {SUMMARY_API_ENDPOINT}")
+                                   default=None, help="兼容旧参数: 只表示期望总结风格,摘要由本地 Agent 基于全文生成")
 
     search_parser = subparsers.add_parser("search", help="搜索已转录全文,并提示未转录的标题/简介命中")
     search_parser.add_argument("name", help="订阅名称")
@@ -1907,10 +2545,22 @@ def rss_main(argv: list[str]) -> int:
     subs_parser = subparsers.add_parser("subs", help="列出所有已订阅的播客")
     subs_parser.add_argument("--library-dir", default=None, help="播客库目录")
 
-    sync_feeds_parser = subparsers.add_parser("sync-feeds", help="批量从 podscribe-feeds 导入并同步")
+    sync_feeds_parser = subparsers.add_parser("sync-feeds", help="批量从 podscribe-feeds 导入并同步(需 --all 或 --category)")
     sync_feeds_parser.add_argument("--feeds-dir", default=None, help="podscribe-feeds 目录路径,默认 transcribe.py 同级的 podscribe-feeds/")
     sync_feeds_parser.add_argument("--limit", type=int, default=50, help="每个播客同步多少期,默认 50")
+    sync_feeds_parser.add_argument("--all", action="store_true", help="导入全部播客")
+    sync_feeds_parser.add_argument("--category", default=None, help="只导入指定分类,如 AI, tech-business")
     sync_feeds_parser.add_argument("--library-dir", default=None, help="播客库目录")
+
+    browse_feeds_parser = subparsers.add_parser("browse-feeds", help="浏览 feeds 目录下所有可选播客")
+    browse_feeds_parser.add_argument("--feeds-dir", default=None, help="podscribe-feeds 目录路径")
+    browse_feeds_parser.add_argument("--library-dir", default=None, help="播客库目录")
+
+    add_from_feeds_parser = subparsers.add_parser("add-from-feeds", help="从 feeds 中选择一个播客订阅")
+    add_from_feeds_parser.add_argument("name", help="播客名(支持模糊匹配)")
+    add_from_feeds_parser.add_argument("--feeds-dir", default=None, help="podscribe-feeds 目录路径")
+    add_from_feeds_parser.add_argument("--limit", type=int, default=50, help="同步多少期,默认 50")
+    add_from_feeds_parser.add_argument("--library-dir", default=None, help="播客库目录")
 
     args = parser.parse_args(argv)
     try:
@@ -1927,6 +2577,10 @@ def rss_main(argv: list[str]) -> int:
             return rss_subs(args, config)
         if args.command == "sync-feeds":
             return rss_sync_feeds(args, config, config_path)
+        if args.command == "browse-feeds":
+            return rss_browse_feeds(args, config, config_path)
+        if args.command == "add-from-feeds":
+            return rss_add_from_feeds(args, config, config_path)
         if args.command == "transcribe":
             return rss_transcribe(args, config, config_path)
         if args.command == "search":
@@ -1946,7 +2600,7 @@ def main() -> int:
         return rss_main(sys.argv[2:])
 
     parser = argparse.ArgumentParser(
-        description="小宇宙播客 → Markdown 文字稿(硅基流动版)",
+        description="小宇宙播客 → Markdown 文字稿(默认必剪免费 ASR)",
     )
     parser.add_argument("url", nargs="?", help="小宇宙 episode 链接")
     parser.add_argument("--init", action="store_true",
@@ -1964,10 +2618,18 @@ def main() -> int:
                         help=f"分段时长(秒),默认 {DEFAULT_SEGMENT_SECONDS}")
     parser.add_argument("--workers", type=int, default=None,
                         help=f"并发请求数,默认 {DEFAULT_WORKERS}")
+    parser.add_argument("--asr-provider", choices=ASR_PROVIDERS, default=None,
+                        help=f"ASR 引擎,默认 {DEFAULT_ASR_PROVIDER}; bcut/jianying 免费免配置,siliconflow 为旧兼容接口")
+    parser.add_argument("--free-asr-chunk-minutes", type=int, default=None,
+                        help=f"免费 ASR 长音频切片分钟数,默认 {DEFAULT_FREE_ASR_CHUNK_MINUTES}")
+    parser.add_argument("--free-asr-overlap-seconds", type=int, default=None,
+                        help=f"免费 ASR 切片重叠秒数,默认 {DEFAULT_FREE_ASR_OVERLAP_SECONDS}")
+    parser.add_argument("--free-asr-workers", type=int, default=None,
+                        help=f"免费 ASR 分片并发数,默认 {DEFAULT_FREE_ASR_WORKERS}")
     parser.add_argument("--model", default=None,
-                        help=f"转录模型,默认 {DEFAULT_MODEL}")
+                        help=f"siliconflow provider 使用的转录模型,默认 {DEFAULT_MODEL}")
     parser.add_argument("--api-endpoint", default=None,
-                        help=f"转录 API endpoint,默认 {API_ENDPOINT}")
+                        help=f"siliconflow provider 使用的 endpoint,默认 {API_ENDPOINT}")
     parser.add_argument("--audio-bitrate", default=None,
                         help=f"转码后的音频码率,默认 {AUDIO_BITRATE}")
     parser.add_argument("--keep-audio", action=argparse.BooleanOptionalAction,
@@ -1979,13 +2641,7 @@ def main() -> int:
     parser.add_argument("--chapter-window", type=int, default=300,
                         help="自动章节的时间窗口秒数,默认 300")
     parser.add_argument("--summary", nargs="?", const="brief", choices=SUMMARY_MODES,
-                        default=None, help="转录后生成摘要。可选: brief/deep/product/investment/obsidian")
-    parser.add_argument("--summary-output", default=None,
-                        help="摘要输出路径,默认在全文稿同目录生成")
-    parser.add_argument("--summary-model", default=None,
-                        help=f"摘要模型,默认 {DEFAULT_SUMMARY_MODEL}")
-    parser.add_argument("--summary-api-endpoint", default=None,
-                        help=f"摘要 API endpoint,默认 {SUMMARY_API_ENDPOINT}")
+                        default=None, help="兼容旧参数: 只表示期望总结风格,摘要由本地 Agent 基于全文生成")
     args = parser.parse_args()
 
     if args.init:
@@ -2003,7 +2659,7 @@ def main() -> int:
 
     if args.preflight_only:
         try:
-            run_preflight(settings, config_path, args.url)
+            run_preflight(settings, config_path, args.url, args.summary)
         except Exception as e:
             log(f"❌ {e}")
             return 1
@@ -2013,19 +2669,17 @@ def main() -> int:
     if not args.url:
         parser.error("缺少小宇宙 episode 链接。生成配置请用 --init。")
 
-    if is_placeholder_api_key(settings.api_key):
-        log("❌ 缺少硅基流动 API Key")
-        log("   方式 1: 运行 python transcribe.py --init 生成 config.json")
-        log("   方式 2: 手动创建 config.json,填入 siliconflow_api_key")
-        log("   方式 3: 设置环境变量 SILICONFLOW_API_KEY")
-        log("   Windows PowerShell: [Environment]::SetEnvironmentVariable('SILICONFLOW_API_KEY', 'sk-xxx', 'User')")
-        log("   macOS/Linux:        export SILICONFLOW_API_KEY=sk-xxx")
+    errors = credential_errors(settings)
+    if errors:
+        log("❌ 配置缺少必要凭据:")
+        for error in errors:
+            log(f"   - {error}")
         return 1
 
     preflight_meta: EpisodeMeta | None = None
     if not args.skip_preflight:
         try:
-            preflight_meta = run_preflight(settings, config_path, args.url)
+            preflight_meta = run_preflight(settings, config_path, args.url, args.summary)
         except Exception as e:
             log(f"❌ {e}")
             return 1
@@ -2037,14 +2691,11 @@ def main() -> int:
             preflight_meta=preflight_meta,
             output_path=Path(settings.output) if settings.output else None,
             summary_mode=args.summary,
-            summary_output=args.summary_output,
             chapters_enabled=args.chapters,
             chapter_window=args.chapter_window,
             clean=args.clean,
         )
         print(result.output_path.resolve())
-        if result.summary_path:
-            print(result.summary_path.resolve())
         return 0
 
     except Exception as e:

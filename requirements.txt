@@ -1,0 +1,11 @@
+# PodScribe has ZERO third-party Python dependencies.
+# It runs on the Python standard library alone (urllib, sqlite3, xml.etree, ...).
+#
+# Requirements:
+#   - Python 3.10+
+#   - ffmpeg & ffprobe on your PATH (for audio download / segmentation)
+#       Windows:  winget install --id=Gyan.FFmpeg -e
+#       macOS:    brew install ffmpeg
+#       Ubuntu:   sudo apt install ffmpeg
+#
+# This file is intentionally empty of pip packages.

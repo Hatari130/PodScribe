@@ -7,13 +7,6 @@
     "source": "xiaoyuzhou-rsshub"
   },
   {
-    "name": "无人知晓",
-    "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/611719d3cb0b82e1df0ad29e",
-    "added_at": "2026-06-09T00:00:00+00:00",
-    "category": "科技商业",
-    "source": "xiaoyuzhou-rsshub"
-  },
-  {
     "name": "三五环",
     "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/5e280fab418a84a0461faa3c",
     "added_at": "2026-06-09T00:00:00+00:00",
@@ -25,7 +18,9 @@
     "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/648b0b641c48983391a63f98",
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "科技商业",
-    "source": "xiaoyuzhou-rsshub"
+    "source": "xiaoyuzhou-rsshub",
+    "note": "科技创业与人物深度对话。聚焦有趣、有独到认知的聪明人，聊AI创业、Infra、投资、中美差异、组织与产品实战。曲凯主理。",
+    "recommended": true
   },
   {
     "name": "知行小酒馆",
@@ -94,7 +89,8 @@
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "科技商业",
     "source": "xiaoyuzhou-rsshub",
-    "note": "商业故事与公司兴衰"
+    "note": "商业故事与沉浮深度访谈/周刊。讲述互联网与科技商业背后的故事与真相，穿插AI与职场/产业变迁。刘飞(财经媒体人)、潇磊(产品经理)主理，含半拿铁·周刊。",
+    "recommended": true
   },
   {
     "name": "自习室 STUDY ROOM",
@@ -108,7 +104,9 @@
     "rss_url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/68981df29e7bcd326eb91d88",
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "科技商业",
-    "source": "xiaoyuzhou-rsshub"
+    "source": "xiaoyuzhou-rsshub",
+    "note": "科技与人文深度长访谈（3-5小时+）。讲述个体命运与时代趋势，重点覆盖AI、具身智能、创业与商业变革。画风更倾向于被访者的个人经历。",
+    "recommended": true
   },
   {
     "name": "MacTalk·夜航西飞",
@@ -149,5 +147,45 @@
     "category": "科技商业",
     "source": "official",
     "note": "商业财经，二级市场视角"
+  },
+  {
+    "name": "All-In",
+    "rss_url": "https://rss.libsyn.com/shows/254861/destinations/1928300.xml",
+    "added_at": "2026-06-08",
+    "category": "tech-business",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 tech-business"
+  },
+  {
+    "name": "Acquired",
+    "rss_url": "https://feeds.transistor.fm/acquired",
+    "added_at": "2026-06-08",
+    "category": "tech-business",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 tech-business"
+  },
+  {
+    "name": "Founders",
+    "rss_url": "https://anchor.fm/s/10542bd40/podcast/rss",
+    "added_at": "2026-06-08",
+    "category": "tech-business",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 tech-business"
+  },
+  {
+    "name": "My First Million",
+    "rss_url": "https://feeds.megaphone.fm/HS2300184645",
+    "added_at": "2026-06-08",
+    "category": "tech-business",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 tech-business"
+  },
+  {
+    "name": "The Knowledge Project",
+    "rss_url": "https://feeds.megaphone.fm/FSMI7575968096",
+    "added_at": "2026-06-08",
+    "category": "tech-business",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 tech-business"
   }
 ]

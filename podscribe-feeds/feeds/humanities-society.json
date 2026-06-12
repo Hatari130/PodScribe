@@ -75,13 +75,6 @@
     "note": "轻松娱乐闲聊"
   },
   {
-    "name": "一树闲谈",
-    "rss_url": "https://www.arbretalk.com/rss",
-    "added_at": "2026-06-09T00:00:00+00:00",
-    "category": "人文社会",
-    "source": "official"
-  },
-  {
     "name": "不丧",
     "rss_url": "https://busangpodcast.com/feed/audio.xml",
     "added_at": "2026-06-09T00:00:00+00:00",
@@ -111,5 +104,40 @@
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "人文社会",
     "source": "official"
+  },
+  {
+    "name": "岩中花述",
+    "rss_url": "https://feed.xyzfm.space/hwen8wf69c6g",
+    "added_at": "2026-06-10",
+    "category": "humanities-society",
+    "source": "itunes",
+    "note": "鲁豫主持，深度访谈。重新认识鲁豫，也重新认识自己。\"把自身的努力和优势看得太轻，把外界的机遇和他人的光芒看得太重，始终无法客观衡量自己的价值。\"对男女话题有偏见的男性朋友也值得一听。",
+    "recommended": true
+  },
+  {
+    "name": "无人知晓",
+    "rss_url": "https://feed.xyzfm.space/ypn9dydpbxpc",
+    "added_at": "2026-06-10",
+    "category": "humanities-society",
+    "source": "itunes",
+    "note": "初听以为是聊投资，其实是聊人生。如果播客有段位，那《无人知晓》就是皇冠上最璀璨的明珠。\"好的东西是生长出来的，而不是计划出来的。\"在这里你能收获平静与松弛。孟岩主理。",
+    "recommended": true
+  },
+  {
+    "name": "西西弗高速",
+    "rss_url": "https://feed.xyzfm.space/76evp7fxkeu8",
+    "added_at": "2026-06-10",
+    "category": "humanities-society",
+    "source": "itunes",
+    "note": "两位新闻从业者的播客。获得更理性的视角去了解时事，更理智地看待性别对立、网络暴力、饭圈文化、女性独立等话题。听完后有种被洗髓的感觉。",
+    "recommended": true
+  },
+  {
+    "name": "Diary of a CEO",
+    "rss_url": "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn",
+    "added_at": "2026-06-08",
+    "category": "humanities-society",
+    "source": "itunes",
+    "note": "原 overseas-en 分类，按主题归入 humanities-society"
   }
 ]

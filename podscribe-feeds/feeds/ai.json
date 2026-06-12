@@ -5,7 +5,8 @@
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "AI",
     "source": "official",
-    "note": "大量 AI 创业者、研究者深度访谈"
+    "note": "科技商业深度长访谈（常2-7小时）。聚焦中国科技业、AI、风险投资与创始人真实表达，高密度前沿信息。推荐：朱啸虎那期（创新适合市场偏差15%）。",
+    "recommended": true
   },
   {
     "name": "硅谷101",
@@ -13,7 +14,8 @@
     "added_at": "2026-06-09T00:00:00+00:00",
     "category": "AI",
     "source": "xiaoyuzhou-rsshub",
-    "note": "硅谷科技与 AI 前沿"
+    "note": "科技商业深度访谈。大量AI主题（AI Agent、DeepMind历史、AI时代大学教育、投资逻辑等）。含101 Weekly轻量版。泓君/Jane主理。",
+    "recommended": true
   },
   {
     "name": "晚点聊 LateTalk",
