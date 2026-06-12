@@ -1,197 +1,173 @@
 # PodScribe
 
-> Turn podcasts into a searchable text knowledge base — subscribe, transcribe, summarize, search.
+[English](./README.en.md) · MIT License · 零 Python 第三方依赖
 
-[简体中文](./README.zh-CN.md) · MIT License · Zero Python dependencies
+播客一站式 skill：**订阅 → 转录 → 知识库**。
 
-PodScribe is a command-line tool (and an optional AI-agent skill) that takes a
-podcast episode link or an RSS feed and gives you a **timestamped transcript**,
-**auto chapters**, a **structured summary**, and a **full-text searchable local
-library**. It ships with a curated, categorized library of high-quality
-Chinese & English podcast feeds so you can discover and subscribe in one step.
+自带分领域中英文播客订阅库（AI / 科技商业 / 人文社会 / 文化艺术 / 健康），可一键补全官方 RSS、导入订阅、同步元数据、全文转录、生成章节与摘要、本地全文搜索。
 
-Transcription uses [SiliconFlow](https://siliconflow.cn)'s **SenseVoice** model;
-summaries use **Qwen**. RSS ingestion and search need **no API key** — only
-transcription does.
+放进 Claude / Codex / WorkBuddy 等 Agent 的 skills 目录即可使用。用户不需要记命令，把需求交给 Agent 就行。
 
----
+## 能干嘛
 
-## Why PodScribe
-
-- 🎙️ **Transcribe** any [Xiaoyuzhou](https://www.xiaoyuzhoufm.com) episode or
-  standard RSS audio item into a timestamped Markdown transcript.
-- 📝 **Summarize & chapter** automatically, with 5 modes: `brief`, `deep`,
-  `product`, `investment`, `obsidian`.
-- 📚 **Curated feed library** across 5 domains (AI / Tech & Business /
-  Humanities & Society / Culture & Art / Health) — auto-resolves official RSS
-  URLs via the public iTunes API.
-- 🔍 **Local full-text search** over everything you've transcribed, backed by
-  SQLite. Ask "did this show ever discuss AI agents?"
-- 🪶 **Zero third-party dependencies.** Pure Python standard library. The only
-  external requirement is `ffmpeg`.
-
----
-
-## Requirements
-
-- **Python 3.10+**
-- **ffmpeg** and **ffprobe** on your `PATH`
-  - Windows: `winget install --id=Gyan.FFmpeg -e`
-  - macOS: `brew install ffmpeg`
-  - Ubuntu/Debian: `sudo apt install ffmpeg`
-- A free [SiliconFlow API key](https://cloud.siliconflow.cn) — **only needed
-  for transcription**, not for RSS ingestion or search.
-
----
-
-## Quick start
-
-```bash
-# 1. Clone
-git clone https://github.com/<your-username>/podscribe.git
-cd podscribe
-
-# 2. Configure your API key (only needed for transcription)
-cp config.example.json config.json
-#   then edit config.json and paste your SiliconFlow key,
-#   OR run the guided wizard:
-python transcribe.py --init
-#   OR use an env var instead of a config file:
-export SILICONFLOW_API_KEY=sk-your-key   # Windows: setx SILICONFLOW_API_KEY sk-your-key
-
-# 3. (Optional) Bootstrap the curated feed library via iTunes
-cd podscribe-feeds
-python resolve_feeds.py bootstrap   # resolves official RSS URLs for the built-in list
-python import_feeds.py --all        # merges into ../subscriptions.json
-cd ..
+```text
+"有什么好的 AI 播客？"                    → 查 feeds/ai.json，推荐并导入
+"帮我把这期小宇宙转成文字稿"               → 转录单集
+"这期播客讲了什么，帮我总结一下"             → 转录 + 摘要 + 章节
+"帮我加上 Dwarkesh Podcast"              → resolve_feeds.py add
+"把这个 RSS 加到本地库"                   → rss add
+"这个播客最近有没有聊过 AI Agent？"         → rss search
+"转成 Obsidian 笔记格式"                  → --summary obsidian
+"哪些订阅源失效了？"                      → resolve_feeds.py validate
 ```
 
-Config resolution order: **CLI args > `config.json` > environment variable > built-in defaults.**
-
----
-
-## Usage
-
-### Transcribe a single episode
-
-```bash
-# Transcript + chapters + summary (recommended)
-python transcribe.py "<episode-url>" --summary --chapters
-
-# Transcript only
-python transcribe.py "<episode-url>"
-
-# Pick a summary mode
-python transcribe.py "<episode-url>" --summary deep --chapters
-```
-
-Summary modes: `brief` (fast read), `deep` (structured notes),
-`product` (PM lens), `investment` (investor lens), `obsidian` (Obsidian-ready).
-
-Run a self-check before transcribing:
-
-```bash
-python transcribe.py --preflight-only "<episode-url>"
-```
-
-### RSS knowledge base
-
-```bash
-# Browse the curated feed library (categorized, marks subscribed/unsubscribed)
-python transcribe.py rss browse-feeds
-
-# Subscribe by fuzzy name from the library
-python transcribe.py rss add-from-feeds "Huberman"
-
-# Or add any RSS URL directly
-python transcribe.py rss add "Show Name" "https://example.com/feed.rss"
-
-# Sync recent episode metadata (no API key needed)
-python transcribe.py rss sync "Show Name" --limit 50
-
-# Search (full text where transcribed; title/description otherwise)
-python transcribe.py rss search "Show Name" "AI agent" --days 90
-
-# Transcribe a chosen episode by number or #id
-python transcribe.py rss transcribe "Show Name" 6 --summary --chapters
-
-# List all subscriptions + transcription stats
-python transcribe.py rss subs
-```
-
-> Recommended flow: **sync → browse/search → pick an episode → transcribe.**
-> Avoid bulk-transcribing entire feeds.
-
-### Manage the feed library
-
-```bash
-cd podscribe-feeds
-python resolve_feeds.py add "Latent Space" --category ai --country us
-python resolve_feeds.py add "声动早咖啡" --category tech-business --country cn
-python resolve_feeds.py upgrade feeds/ --country cn   # proxy feed -> official Apple feed
-python resolve_feeds.py validate feeds/               # health-check RSS links
-python import_feeds.py --all
-```
-
----
-
-## Project layout
+## 目录结构
 
 ```
 podscribe/
-├── transcribe.py            # Core: transcription / RSS management / search
-├── config.example.json      # Copy to config.json and add your key
-├── podscribe-feeds/         # Curated, categorized feed library
-│   ├── feeds/               # ai / tech-business / humanities-society / culture-art / health
-│   ├── resolve_feeds.py     # iTunes resolver: bootstrap / add / upgrade / validate
-│   └── import_feeds.py      # Merge category files -> subscriptions.json
-├── SKILL.md                 # Instructions for AI-agent integration (Claude/Codex/etc.)
-└── README.md
+├── transcribe.py                # 核心：转录 / RSS 管理 / 搜索
+├── config.json                  # 硅基流动 API 配置
+├── subscriptions.json           # 活跃订阅列表
+├── podcast_library/             # 转录后的本地知识库
+│
+├── podscribe-feeds/             # 📦 分领域订阅库
+│   ├── feeds/
+│   │   ├── ai.json              # AI（中英混排，含 Lex Fridman）
+│   │   ├── tech-business.json   # 科技与商业（含 Acquired / All-In …）
+│   │   ├── humanities-society.json
+│   │   ├── culture-art.json
+│   │   └── health.json          # 健康（含 Huberman Lab）
+│   ├── resolve_feeds.py         # iTunes 解析：bootstrap / add / upgrade / validate
+│   └── import_feeds.py          # 合并分类 → subscriptions.json
+│
+├── SKILL.md                     # Agent 指令文档
+└── README.md                    # 本文件
 ```
 
-Files **not** in the repo (generated locally, see `.gitignore`):
-`config.json`, `subscriptions.json`, and `podcast_library/` (your SQLite DB and
-transcripts).
+## 第一次使用
 
----
+跟 Agent 说一句就行：
 
-## Use as an AI-agent skill
+```text
+"帮我装一下这个播客工具"
+"初始化一下 PodScribe"
+"配好播客 skill，我想开始用了"
+```
 
-PodScribe also works as a skill for AI coding agents (Claude Code, Codex,
-WorkBuddy, …). Drop the folder into your agent's skills directory and the agent
-reads [`SKILL.md`](./SKILL.md) to drive the commands for you — you just describe
-what you want ("summarize this episode", "find me a good AI podcast").
+Agent 会自动完成以下全部步骤：
 
----
+1. **检查环境** — python / ffmpeg / ffprobe，缺什么装什么
+2. **配置 API Key** — 运行 `python transcribe.py --init`，引导你填硅基流动的 Key（RSS 入库不需要，转录时才用）
+3. **拉取订阅库** — 运行 `resolve_feeds.py bootstrap`，通过 iTunes 把内置 64 个中英文节目的官方 RSS 全部解析回来
+4. **导入订阅** — 运行 `import_feeds.py --all`，合并进 `subscriptions.json`
 
-## Limitations
+全程你只需要提供一个硅基流动 API Key，其余 Agent 处理。
 
-- Built for Xiaoyuzhou episode links and standard RSS audio feeds.
-- Episodes without an audio URL in their RSS can only be indexed by
-  title/description — they can't be transcribed.
-- The transcription model does not perform speaker diarization.
-- Auto chapters and summaries are first drafts; review important content
-  manually.
-- `bootstrap` / `add` / `upgrade` require access to `itunes.apple.com`.
+> 手动跑也行，见下面的命令，但一般不需要。
 
----
+<details>
+<summary>手动命令（折叠）</summary>
 
-## Legal & ethics
+```bash
+# 环境
+# Windows:  winget install --id=Gyan.FFmpeg -e
+# macOS:    brew install ffmpeg
+# Ubuntu:   sudo apt install ffmpeg python3
+python --version && ffmpeg -version && ffprobe -version
 
-This tool transcribes audio you choose to process. Podcast audio and the
-resulting transcripts may be **copyrighted** by their creators. **Do not
-redistribute transcripts or summaries of copyrighted shows**, and respect each
-podcast's terms of use. PodScribe ships only public RSS feed URLs — never any
-transcribed content. Use for personal research, accessibility, and note-taking.
+# 配置
+python transcribe.py --init
+# 或环境变量: export SILICONFLOW_API_KEY=sk-你的Key
 
----
+# 订阅库
+cd podscribe-feeds
+python resolve_feeds.py bootstrap
+python import_feeds.py --all
+```
 
-## Contributing
+</details>
 
-Issues and PRs welcome — especially additions to the curated feed library
-(`podscribe-feeds/feeds/*.json`). Each entry just needs a name, public RSS URL,
-category, and a short note.
+## 日常使用
 
-## License
+### 转录单集
 
-[MIT](./LICENSE)
+```bash
+# 转录 + 章节 + 摘要（推荐）
+python transcribe.py "<小宇宙链接>" --summary --chapters
+
+# 纯转录
+python transcribe.py "<小宇宙链接>"
+
+# 指定摘要模式
+python transcribe.py "<链接>" --summary deep --chapters
+```
+
+摘要模式：`brief`（快速看懂）、`deep`（结构化笔记）、`product`（产品经理视角）、`investment`（投资视角）、`obsidian`（Obsidian 格式）。
+
+### RSS 知识库
+
+不要默认批量转录。正确流程：同步 → 浏览/搜索 → 用户选某一期 → 转录。
+
+```bash
+# 添加订阅
+python transcribe.py rss add "日谈公园" "https://anchor.fm/s/2389ed24/podcast/rss"
+
+# 同步最近 50 期元数据
+python transcribe.py rss sync "日谈公园" --limit 50
+
+# 列出单集
+python transcribe.py rss list "日谈公园" --limit 50
+
+# 搜索（已转录的搜全文，未转录的只搜标题/简介）
+python transcribe.py rss search "日谈公园" "AI Agent" --days 90
+
+# 转录选中的一期
+python transcribe.py rss transcribe "日谈公园" 6 --summary --chapters
+
+# 列出所有订阅及统计
+python transcribe.py rss subs
+```
+
+### 管理订阅库
+
+```bash
+cd podscribe-feeds
+
+# 按名字加一个节目
+python resolve_feeds.py add "Latent Space" --category ai --country us
+python resolve_feeds.py add "声动早咖啡" --category tech-business --country cn
+
+# 代理源升级为官方源
+python resolve_feeds.py upgrade feeds/ --country cn
+
+# 检查链接存活
+python resolve_feeds.py validate feeds/
+
+# 导入新增的
+python import_feeds.py --all
+```
+
+## 输出
+
+全文稿：`<标题>.md`
+摘要：`<标题>.summary.brief.md` / `.deep.md` / `.obsidian.md` 等
+RSS 转录：`podcast_library/transcripts/`
+数据库：`podcast_library/library.sqlite3`
+订阅：`subscriptions.json`
+
+## 常用检查
+
+```bash
+python transcribe.py --preflight-only "<链接>"   # 转录前自检
+python transcribe.py --help                       # 主命令帮助
+python transcribe.py rss --help                   # RSS 帮助
+```
+
+## 当前限制
+
+- 主要支持小宇宙 episode 链接和标准 RSS 音频源。
+- RSS 中没有音频 URL 的单集只能入库标题和简介，不能转录。
+- 转录模型不区分说话人。
+- 自动章节和摘要适合作为初稿，重要内容建议人工复核。
+- 长音频耗时取决于音频长度、并发数和 API 限流。
+- `bootstrap` / `add` / `upgrade` 需要能访问 `itunes.apple.com`。
