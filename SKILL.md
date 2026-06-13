@@ -40,14 +40,16 @@ Read only the file needed for the current task:
 
 ## Fast Commands
 
+All commands use the absolute path to transcribe.py so they work from any CWD. The `library_dir` in `config.json` ensures the correct database is used.
+
 ```bash
-python transcribe.py --preflight-only "<episode-url>"
-python transcribe.py "<episode-url>" --chapters
-python transcribe.py rss subs
-python transcribe.py rss sync "<podcast-name>" --limit 50
-python transcribe.py rss list "<podcast-name>" --limit 50
-python transcribe.py rss search "<podcast-name>" "<topic>" --days 90
-python transcribe.py rss transcribe "<podcast-name>" 6 --chapters
+python ~/.workbuddy/skills/podscribe/transcribe.py --preflight-only "<episode-url>"
+python ~/.workbuddy/skills/podscribe/transcribe.py "<episode-url>" --chapters
+python ~/.workbuddy/skills/podscribe/transcribe.py rss subs
+python ~/.workbuddy/skills/podscribe/transcribe.py rss sync "<podcast-name>" --limit 50
+python ~/.workbuddy/skills/podscribe/transcribe.py rss list "<podcast-name>" --limit 50
+python ~/.workbuddy/skills/podscribe/transcribe.py rss search "<podcast-name>" "<topic>" --days 90
+python ~/.workbuddy/skills/podscribe/transcribe.py rss transcribe "<podcast-name>" <episode-id> --chapters
 ```
 
 For feed catalog maintenance:

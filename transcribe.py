@@ -1530,9 +1530,21 @@ class FeedEpisode:
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def library_root(config: dict, override: str | None) -> Path:
-    configured = override or config_get(config, "library_dir", default="podcast_library")
-    return Path(configured).expanduser()
+def library_root(config: dict, override: str | None, config_path: Path | None = None) -> Path:
+    """Resolve library_dir to an absolute path.
+
+    - If library_dir is absolute or starts with ~ → use as-is (expanduser).
+    - If library_dir is relative AND config_path is known → resolve relative to
+      config_path.parent (i.e. the skill/ config directory). This makes the
+      entire skill portable: copying it to another agent or machine just works.
+    - If library_dir is relative and config_path is None → resolve relative to CWD
+      (backward-compatible fallback).
+    """
+    raw = override or config_get(config, "library_dir", default="podcast_library")
+    p = Path(raw).expanduser()
+    if not p.is_absolute() and config_path is not None:
+        return (config_path.parent / p).resolve()
+    return p.resolve()
 
 # ============================================================
 # subscriptions.json 人类可读订阅清单
@@ -2026,7 +2038,7 @@ def print_episode_rows(rows: list[sqlite3.Row]) -> None:
         print(f"[{episode_label(row)}] {format_date(row['published_at'])} {status} {row['title']}")
 
 def rss_add(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     with open_library(root) as conn:
         subscription = add_subscription(conn, args.name, args.rss_url)
     upsert_subscription_json(config_path, args.name, args.rss_url)
@@ -2035,7 +2047,7 @@ def rss_add(args: argparse.Namespace, config: dict, config_path: Path | None = N
     return 0
 
 def rss_sync(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     with open_library(root) as conn:
         subscription = get_required_subscription(conn, args.name)
         log(f"🌐 读取 RSS: {subscription['rss_url']}")
@@ -2051,8 +2063,8 @@ def rss_sync(args: argparse.Namespace, config: dict, config_path: Path | None = 
     print(f"库目录: {root.resolve()}")
     return 0
 
-def rss_list(args: argparse.Namespace, config: dict) -> int:
-    root = library_root(config, args.library_dir)
+def rss_list(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    root = library_root(config, args.library_dir, config_path)
     with open_library(root) as conn:
         subscription = get_required_subscription(conn, args.name)
         rows = list_episodes(conn, subscription["id"], days=args.days, limit=args.limit)
@@ -2060,9 +2072,9 @@ def rss_list(args: argparse.Namespace, config: dict) -> int:
     print_episode_rows(rows)
     return 0
 
-def rss_subs(args: argparse.Namespace, config: dict) -> int:
+def rss_subs(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
     """列出所有已订阅的播客（从 subscriptions.json 读取，同时补充 SQLite 里的信息）。"""
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     json_subs = load_subscriptions_json(subscriptions_json_path(None))
 
     # 从 SQLite 补充 episode 统计
@@ -2170,7 +2182,7 @@ def rss_browse_feeds(args: argparse.Namespace, config: dict, config_path: Path |
         return 1
 
     # 检查哪些已订阅
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     subscribed_names: set[str] = set()
     if root.exists():
         with open_library(root) as conn:
@@ -2250,7 +2262,7 @@ def rss_add_from_feeds(args: argparse.Namespace, config: dict, config_path: Path
     category = entry.get("_category", "")
 
     # 检查是否已订阅
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     with open_library(root) as conn:
         existing = get_subscription(conn, name)
         if existing:
@@ -2323,7 +2335,7 @@ def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | N
     else:
         print(f"全部导入,共 {len(all_entries)} 个播客\n")
 
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     added = 0
     skipped = 0
     failed = 0
@@ -2371,7 +2383,7 @@ def rss_sync_feeds(args: argparse.Namespace, config: dict, config_path: Path | N
     return 0
 
 def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | None) -> int:
-    root = library_root(config, args.library_dir)
+    root = library_root(config, args.library_dir, config_path)
     settings = build_settings(args, config)
     errors = credential_errors(settings)
     if errors:
@@ -2416,8 +2428,8 @@ def rss_transcribe(args: argparse.Namespace, config: dict, config_path: Path | N
     print(result.output_path.resolve())
     return 0
 
-def rss_search(args: argparse.Namespace, config: dict) -> int:
-    root = library_root(config, args.library_dir)
+def rss_search(args: argparse.Namespace, config: dict, config_path: Path | None = None) -> int:
+    root = library_root(config, args.library_dir, config_path)
     terms = query_terms(args.query)
     with open_library(root) as conn:
         subscription = get_required_subscription(conn, args.name)
@@ -2572,9 +2584,9 @@ def rss_main(argv: list[str]) -> int:
         if args.command == "sync":
             return rss_sync(args, config, config_path)
         if args.command == "list":
-            return rss_list(args, config)
+            return rss_list(args, config, config_path)
         if args.command == "subs":
-            return rss_subs(args, config)
+            return rss_subs(args, config, config_path)
         if args.command == "sync-feeds":
             return rss_sync_feeds(args, config, config_path)
         if args.command == "browse-feeds":
@@ -2584,7 +2596,7 @@ def rss_main(argv: list[str]) -> int:
         if args.command == "transcribe":
             return rss_transcribe(args, config, config_path)
         if args.command == "search":
-            return rss_search(args, config)
+            return rss_search(args, config, config_path)
         parser.error("未知 RSS 命令")
         return 2
     except Exception as e:
